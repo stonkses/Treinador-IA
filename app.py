@@ -1,192 +1,185 @@
 import streamlit as st
-import json
-import os
-import time
-from datetime import datetime
 from google import genai
+from supabase import create_client, Client
+import json
+import pandas as pd
+import io
 
-st.set_page_config(page_title="Coach IA Endurance", page_icon="🏃‍♂️", layout="centered")
+# Configuração da página
+st.set_page_config(
+    page_title="Coach IA Endurance",
+    page_icon="🏃‍♂️",
+    layout="wide"
+)
 
-# ================= IDENTIFICAÇÃO DO ATLETA (MULTI-USUÁRIO) =================
-st.sidebar.header("👤 Perfil de Acesso")
-usuario_input = st.sidebar.text_input("Digite seu nome ou apelido:", placeholder="Ex: arthur").strip().lower()
-usuario_limpo = "".join(c for c in usuario_input if c.isalnum())
-
-if not usuario_limpo:
-    st.title("🏃‍♂️ Coach IA - Treinos Adaptativos")
-    st.info("👈 Digite seu **nome ou apelido** no menu lateral para carregar ou criar sua planilha individual.")
-    st.stop()
-
-ARQUIVO_DADOS = f"dados_{usuario_limpo}.json"
-ARQUIVO_CHAVE = "config_api.json"
-
-def carregar_dados():
-    if os.path.exists(ARQUIVO_DADOS):
-        with open(ARQUIVO_DADOS, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"perfil": {}, "planilha_atual": "", "semana": 1, "historico": []}
-
-def salvar_dados(dados):
-    with open(ARQUIVO_DADOS, "w", encoding="utf-8") as f:
-        json.dump(dados, f, ensure_ascii=False, indent=4)
-
-def carregar_chave():
-    # 1. Tenta ler dos Secrets da nuvem (Streamlit Cloud)
+# Conexão com Supabase (Nuvem)
+@st.cache_resource
+def init_supabase() -> Client | None:
     try:
-        if "GEMINI_API_KEY" in st.secrets:
-            return st.secrets["GEMINI_API_KEY"]
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
+        return create_client(url, key)
     except Exception:
-        pass
-    # 2. Tenta ler do arquivo local
-    if os.path.exists(ARQUIVO_CHAVE):
-        with open(ARQUIVO_CHAVE, "r", encoding="utf-8") as f:
-            return json.load(f).get("api_key", "")
-    return ""
+        return None
 
-def salvar_chave(chave):
-    with open(ARQUIVO_CHAVE, "w", encoding="utf-8") as f:
-        json.dump({"api_key": chave}, f)
+supabase = init_supabase()
 
-def chamar_ia_seguro(client, prompt):
-    modelos = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
+# Funções de persistência na nuvem
+def carregar_dados_usuario(usuario: str) -> dict:
+    usuario_limpo = usuario.strip().lower()
+    if supabase:
+        try:
+            res = supabase.table("atletas").select("dados").eq("usuario", usuario_limpo).execute()
+            if res.data and len(res.data) > 0:
+                return res.data[0]["dados"]
+        except Exception as e:
+            st.sidebar.error(f"Erro ao carregar da nuvem: {e}")
+    return {
+        "perfil": None,
+        "planilha": [],
+        "historico_semanas": [],
+        "semana_atual": 1
+    }
+
+def salvar_dados_usuario(usuario: str, dados: dict):
+    usuario_limpo = usuario.strip().lower()
+    if supabase:
+        try:
+            supabase.table("atletas").upsert({
+                "usuario": usuario_limpo,
+                "dados": dados
+            }).execute()
+        except Exception as e:
+            st.error(f"Erro ao salvar na nuvem: {e}")
+
+# Inicialização do cliente Gemini com fallback automático
+def get_gemini_client():
+    try:
+        api_key = st.secrets["GEMINI_API_KEY"]
+        return genai.Client(api_key=api_key)
+    except Exception:
+        return None
+
+def gerar_resposta_ia(prompt: str) -> str:
+    client = get_gemini_client()
+    if not client:
+        raise ValueError("Chave GEMINI_API_KEY não encontrada nos Secrets.")
+    
+    modelos = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
     ultimo_erro = None
     for modelo in modelos:
-        for tentativa in range(2):
-            try:
-                response = client.models.generate_content(
-                    model=modelo,
-                    contents=prompt
-                )
-                return response.text
-            except Exception as e:
-                ultimo_erro = e
-                if "503" in str(e) or "UNAVAILABLE" in str(e):
-                    time.sleep(2)
-                    continue
-                break
-    raise ultimo_erro
+        try:
+            response = client.models.generate_content(
+                model=modelo,
+                contents=prompt
+            )
+            return response.text
+        except Exception as e:
+            ultimo_erro = e
+            continue
+    raise RuntimeError(f"Falha ao gerar resposta nos modelos disponíveis: {ultimo_erro}")
 
-dados = carregar_dados()
-chave_salva = carregar_chave()
+def extrair_json(texto: str) -> list:
+    texto_limpo = texto.strip()
+    if "```json" in texto_limpo:
+        texto_limpo = texto_limpo.split("```json")[1].split("```")[0].strip()
+    elif "```" in texto_limpo:
+        texto_limpo = texto_limpo.split("```")[1].split("```")[0].strip()
+    return json.loads(texto_limpo)
 
-st.title("🏃‍♂️ Coach IA - Treinos Adaptativos")
-st.caption(f"Atleta: **{usuario_limpo.capitalize()}** | Ciclo Atual: Semana {dados.get('semana', 1)}")
+# --- BARRA LATERAL: PERFIL DE ACESSO ---
+st.sidebar.header("👤 Perfil de Acesso")
+nome_usuario = st.sidebar.text_input("Digite seu nome ou apelido:", placeholder="Ex: arthur")
 
-# ================= BARRA LATERAL: CHAVE E RESET =================
-if chave_salva:
-    api_key = chave_salva
+if not nome_usuario.strip():
+    st.title("🏃‍♂️ Coach IA - Treinos Adaptativos")
+    st.info("👉 Digite seu **nome ou apelido** no menu lateral para carregar ou criar sua planilha individual.")
+    st.stop()
+
+usuario_id = nome_usuario.strip().lower()
+
+# Status da IA e da Nuvem na barra lateral
+if get_gemini_client():
     st.sidebar.success("✅ IA Conectada!")
 else:
-    st.sidebar.divider()
-    api_key_input = st.sidebar.text_input("🔑 Chave API do Gemini:", type="password")
-    api_key = api_key_input.strip().replace('"', '').replace("'", "")
-    if st.sidebar.button("💾 Salvar Chave"):
-        if api_key:
-            salvar_chave(api_key)
-            st.rerun()
+    st.sidebar.error("❌ IA Desconectada (verifique GEMINI_API_KEY)")
+
+if supabase:
+    st.sidebar.success("☁️ Nuvem Conectada!")
+else:
+    st.sidebar.warning("⚠️ Modo Temporário (Nuvem não configurada)")
+
+# Carrega estado do usuário na sessão
+if "usuario_ativo" not in st.session_state or st.session_state.usuario_ativo != usuario_id:
+    st.session_state.usuario_ativo = usuario_id
+    st.session_state.dados = carregar_dados_usuario(usuario_id)
+
+dados = st.session_state.dados
 
 st.sidebar.divider()
 if st.sidebar.button("🗑️ Resetar Meus Treinos"):
-    if os.path.exists(ARQUIVO_DADOS):
-        os.remove(ARQUIVO_DADOS)
+    dados = {
+        "perfil": None,
+        "planilha": [],
+        "historico_semanas": [],
+        "semana_atual": 1
+    }
+    st.session_state.dados = dados
+    salvar_dados_usuario(usuario_id, dados)
     st.rerun()
+
+# --- CORPO PRINCIPAL ---
+st.title("🏃‍♂️ Coach IA - Treinos Adaptativos")
+st.caption(f"Atleta: **{nome_usuario.strip().title()}** | Ciclo Atual: Semana {dados['semana_atual']}")
 
 aba1, aba2, aba3 = st.tabs(["📋 Planilha Atual", "✅ Registrar Treino", "🧠 Evolução & Próxima Semana"])
 
-# ================= ABA 1: GERAR DO ZERO OU USAR BASE =================
+# ==========================================
+# ABA 1: PLANILHA ATUAL / CONFIGURAÇÃO
+# ==========================================
 with aba1:
-    if not dados["planilha_atual"]:
-        modo = st.radio(
+    if not dados["planilha"]:
+        modo_inicio = st.radio(
             "Como você quer começar?",
             ["🆕 Criar planilha do zero com IA", "📥 Já tenho minha planilha (usar de base)"],
             horizontal=True
         )
         st.divider()
 
-        if modo == "📥 Já tenho minha planilha (usar de base)":
-            st.subheader("Gerar Nova Planilha a Partir da Sua Base")
-            esporte_imp = st.selectbox(
-                "Qual esporte ou modalidade?",
-                ["Triatlo (Natação + Bike + Corrida)", "Corrida", "Ciclismo", "Natação", "Duatlo", "Outro"]
-            )
-            if esporte_imp == "Outro":
-                esporte_imp = st.text_input("Digite o esporte:")
-
-            objetivo_imp = st.text_input("Qual seu novo objetivo ou foco?", placeholder="Ex: Triatlo SuperSprint, 5km sub 27min, aumentar volume...")
-            equipamentos_imp = st.text_input("Equipamentos / observações (opcional):", placeholder="Ex: Garmin Venu 4, fita cardíaca, bike...")
-            planilha_base = st.text_area(
-                "Cole aqui a sua planilha atual/anterior para servir de base:",
-                height=220,
-                placeholder="Ex:\nSegunda: Corrida leve 5km Z2\nTerça: Bike 20km ritmo moderado\nQuarta: Natação 1000m técnica..."
-            )
-
-            if st.button("🚀 Gerar Nova Planilha com Base Nessa", type="primary"):
-                if not api_key:
-                    st.warning("⚠️ Chave da API não configurada!")
-                elif not planilha_base.strip():
-                    st.warning("⚠️ Cole o texto da sua planilha de base antes de gerar.")
-                else:
-                    try:
-                        client = genai.Client(api_key=api_key)
-                        prompt_base = (
-                            f"Você é um treinador especialista em esportes de endurance. "
-                            f"O atleta já possui uma planilha de treino e quer que você a use como BASE "
-                            f"(respeitando o nível de condicionamento, distribuição de dias e modalidades atuais) "
-                            f"para montar uma NOVA planilha otimizada para a SEMANA 1 do novo ciclo.\n\n"
-                            f"Esporte: {esporte_imp}\n"
-                            f"Objetivo atual: {objetivo_imp or 'Evoluir condicionamento mantendo a estrutura base'}\n"
-                            f"Equipamentos/Observações: {equipamentos_imp}\n"
-                            f"PLANILHA BASE DO ATLETA:\n{planilha_base.strip()}\n\n"
-                            f"Comece com um breve resumo ('### 🎯 Ajustes feitos sobre sua base') explicando o que você manteve e o que evoluiu. "
-                            f"Depois organize a nova planilha em uma tabela Markdown clara com: Dia, Modalidade, Treino Detalhado e Foco."
-                        )
-                        with st.spinner("Analisando sua planilha base e montando a nova..."):
-                            texto_resposta = chamar_ia_seguro(client, prompt_base)
-                            dados["perfil"] = {
-                                "esporte": esporte_imp,
-                                "nivel": "Baseado na planilha própria",
-                                "dias_semana": "Conforme planilha base",
-                                "objetivo": objetivo_imp or "Evoluir planilha base",
-                                "observacoes": equipamentos_imp
-                            }
-                            dados["planilha_atual"] = texto_resposta
-                            dados["semana"] = 1
-                            salvar_dados(dados)
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f"Erro ao conectar com a IA: {e}")
-
-        else:
+        if modo_inicio == "🆕 Criar planilha do zero com IA":
             st.subheader("Configurar Perfil do Atleta")
-            esporte = st.selectbox(
-                "Qual esporte ou modalidade?",
-                ["Corrida", "Triatlo (Natação + Bike + Corrida)", "Ciclismo", "Natação", "Duatlo", "Outro"]
-            )
-            if esporte == "Outro":
-                esporte = st.text_input("Digite o esporte:")
-
-            nivel = st.select_slider("Nível atual:", options=["Iniciante", "Intermediário", "Avançado"])
+            esporte = st.selectbox("Qual esporte ou modalidade?", ["Corrida", "Ciclismo", "Triathlon", "Musculação", "Crossfit", "Natação", "Outro"])
+            nivel = st.select_slider("Nível atual:", options=["Iniciante", "Intermediário", "Avançado", "Competitivo"])
             dias_semana = st.slider("Quantos dias por semana pode treinar?", 2, 7, 4)
             objetivo = st.text_input("Qual seu objetivo principal?", placeholder="Ex: Completar 10km, melhorar pace...")
             observacoes = st.text_area("Lesões, limitações ou equipamentos:", placeholder="Ex: Tenho relógio GPS, piscina 25m...")
 
-            if st.button("🚀 Gerar Minha Primeira Semana", type="primary"):
-                if not api_key:
-                    st.warning("⚠️ Chave da API não configurada!")
-                elif not objetivo:
-                    st.warning("⚠️ Preencha qual é o seu objetivo principal.")
+            if st.button("🚀 Gerar Minha Planilha Inicial", type="primary"):
+                if not objetivo.strip():
+                    st.warning("Por favor, preencha seu objetivo principal.")
                 else:
-                    try:
-                        client = genai.Client(api_key=api_key)
-                        prompt = (
-                            f"Você é um treinador especialista em esportes de endurance. "
-                            f"Crie uma planilha de treinos para a SEMANA 1: "
-                            f"Esporte: {esporte} | Nível: {nivel} | Dias/semana: {dias_semana} | "
-                            f"Objetivo: {objetivo} | Observações: {observacoes}. "
-                            f"Organize em uma tabela Markdown clara com: Dia, Modalidade, Treino Detalhado e Foco."
-                        )
-                        with st.spinner("Montando sua planilha personalizada..."):
-                            texto_resposta = chamar_ia_seguro(client, prompt)
+                    with st.spinner("A IA está montando sua planilha personalizada..."):
+                        prompt = f"""
+                        Você é um treinador de alta performance especialista em {esporte}.
+                        Crie uma planilha de treino para a Semana 1 para um atleta com o seguinte perfil:
+                        - Modalidade: {esporte}
+                        - Nível: {nivel}
+                        - Disponibilidade: {dias_semana} dias na semana
+                        - Objetivo: {objetivo}
+                        - Observações/Limitações: {observacoes or 'Nenhuma'}
+
+                        Retorne EXCLUSIVAMENTE um array JSON válido (sem markdown ou texto extra) onde cada objeto representa um treino da semana com as exatas chaves:
+                        - "dia": string (ex: "Segunda-feira", "Quarta-feira")
+                        - "titulo": string (ex: "Rodagem Leve Z2", "Treino de Tiros")
+                        - "descricao": string (detalhes de aquecimento, parte principal, paces/zonas/cargas e desaquecimento)
+                        - "duracao_estimada": string (ex: "45 min" ou "8 km")
+                        - "concluido": false
+                        - "feedback": ""
+                        - "rpe": 5
+                        """
+                        try:
+                            resposta = gerar_resposta_ia(prompt)
+                            planilha_gerada = extrair_json(resposta)
                             dados["perfil"] = {
                                 "esporte": esporte,
                                 "nivel": nivel,
@@ -194,101 +187,184 @@ with aba1:
                                 "objetivo": objetivo,
                                 "observacoes": observacoes
                             }
-                            dados["planilha_atual"] = texto_resposta
-                            dados["semana"] = 1
-                            salvar_dados(dados)
+                            dados["planilha"] = planilha_gerada
+                            salvar_dados_usuario(usuario_id, dados)
                             st.rerun()
-                    except Exception as e:
-                        st.error(f"Erro ao conectar com a IA: {e}")
-    else:
-        st.subheader(f"📅 Planilha - Semana {dados.get('semana', 1)}")
-        st.markdown(dados["planilha_atual"])
+                        except Exception as e:
+                            st.error(f"Erro ao gerar planilha: {e}")
 
-# ================= ABA 2: REGISTRAR TREINO FEITO =================
-with aba2:
-    st.subheader("Diário de Treino")
-    if not dados["planilha_atual"]:
-        st.info("Gere sua planilha na aba anterior antes de registrar treinos.")
-    else:
-        with st.form("form_treino", clear_on_submit=True):
-            dia_treino = st.selectbox("Dia da semana do treino:", ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"])
-            modalidade_feita = st.text_input("Modalidade realizada:", value=dados["perfil"].get("esporte", ""))
-            realizado = st.text_area("O que você realmente fez? (Distância, tempo, pace, watts...)", placeholder="Ex: Corri 5km em 27min30s ou Pulei o treino.")
-            pse = st.slider("Percepção de Esforço (1 = Muito leve | 10 = Exaustão máxima):", 1, 10, 6)
-            sensacao = st.text_input("Como seu corpo respondeu? (Dores, fadiga, sobrou energia?)", placeholder="Ex: Senti a perna pesada no final.")
-            
-            enviado = st.form_submit_button("💾 Salvar Treino no Histórico", type="primary")
-            if enviado:
-                if not realizado:
-                    st.warning("Descreva o que foi realizado no treino.")
+        else:
+            st.subheader("Importar Planilha Existente como Base")
+            esporte_base = st.selectbox("Modalidade da planilha:", ["Corrida", "Ciclismo", "Triathlon", "Musculação", "Crossfit", "Natação", "Outro"])
+            objetivo_base = st.text_input("Objetivo para a próxima evolução:", placeholder="Ex: Aumentar volume com segurança, baixar tempo nos 5km...")
+            planilha_colada = st.text_area(
+                "Cole aqui sua planilha atual (texto, tabela do Excel, resumo dos treinos):",
+                height=200,
+                placeholder="Ex:\nSeg: 6km leve pace 5:30\nQua: 8x400m forte\nSex: 5km regenerativo\nDom: 12km longo"
+            )
+
+            if st.button("🔄 Analisar e Gerar Planilha Evoluída", type="primary"):
+                if not planilha_colada.strip():
+                    st.warning("Cole sua planilha atual antes de continuar.")
                 else:
-                    registro = {
-                        "data": datetime.now().strftime("%d/%m/%Y"),
-                        "semana": dados.get("semana", 1),
-                        "dia": dia_treino,
-                        "modalidade": modalidade_feita,
-                        "realizado": realizado,
-                        "pse": pse,
-                        "sensacao": sensacao
-                    }
-                    dados["historico"].append(registro)
-                    salvar_dados(dados)
-                    st.success("Treino salvo! A IA usará esse dado para ajustar sua próxima semana.")
+                    with st.spinner("Analisando sua base e estruturando sua nova semana..."):
+                        prompt = f"""
+                        Você é um treinador especialista em {esporte_base}.
+                        O atleta já possui a seguinte planilha/rotina atual:
+                        \"\"\"
+                        {planilha_colada}
+                        \"\"\"
+                        Objetivo do atleta: {objetivo_base or 'Evoluir condicionamento mantendo a estrutura base'}
 
-    if dados["historico"]:
-        st.divider()
-        st.subheader("📊 Histórico Recente")
-        for item in reversed(dados["historico"][-5:]):
-            st.markdown(f"**Semana {item['semana']} - {item['dia']} ({item['data']})** | Esforço (PSE): **{item['pse']}/10**")
-            st.write(f"• **Feito:** {item['realizado']}")
-            if item['sensacao']:
-                st.caption(f"💬 Sensação: {item['sensacao']}")
-            st.markdown("---")
+                        Analise a rotina colada, preserve a estrutura de dias que funciona para ele e gere a versão evoluída/otimizada para esta semana.
+                        Retorne EXCLUSIVAMENTE um array JSON válido com as exatas chaves:
+                        - "dia": string
+                        - "titulo": string
+                        - "descricao": string
+                        - "duracao_estimada": string
+                        - "concluido": false
+                        - "feedback": ""
+                        - "rpe": 5
+                        """
+                        try:
+                            resposta = gerar_resposta_ia(prompt)
+                            planilha_gerada = extrair_json(resposta)
+                            dados["perfil"] = {
+                                "esporte": esporte_base,
+                                "nivel": "Base Importada",
+                                "dias_semana": len(planilha_gerada),
+                                "objetivo": objetivo_base or "Evolução contínua",
+                                "observacoes": "Gerado a partir de planilha importada"
+                            }
+                            dados["planilha"] = planilha_gerada
+                            salvar_dados_usuario(usuario_id, dados)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Erro ao processar planilha: {e}")
 
-# ================= ABA 3: IA ANALISA E ADAPTA A CARGA =================
-with aba3:
-    st.subheader("🧠 Treinador Adaptativo")
-    st.write("A IA analisa seus treinos realizados, seu nível de cansaço (PSE) e decide se aumenta, mantém ou reduz a intensidade.")
-
-    if not dados["planilha_atual"]:
-        st.info("Gere sua planilha primeiro.")
-    elif not dados["historico"]:
-        st.warning("⚠️ Registre pelo menos um treino na aba 'Registrar Treino' para a IA ter dados.")
     else:
-        if st.button("🔄 Analisar Desempenho e Gerar Próxima Semana", type="primary"):
-            if not api_key:
-                st.warning("⚠️ Chave da API não configurada!")
-            else:
+        # Exibe a planilha ativa
+        st.subheader(f"Treinos Programados — Semana {dados['semana_atual']}")
+        for idx, treino in enumerate(dados["planilha"]):
+            status_icon = "✅" if treino.get("concluido") else "⏳"
+            with st.expander(f"{status_icon} {treino['dia']} — {treino['titulo']} ({treino['duracao_estimada']})", expanded=not treino.get("concluido")):
+                st.write(treino["descricao"])
+                if treino.get("concluido"):
+                    st.success(f"Concluído | Esforço (RPE): {treino.get('rpe', '-')}/10 | Feedback: {treino.get('feedback') or 'Sem observações'}")
+
+        st.divider()
+        # Botões de Exportação (CSV e Texto)
+        st.subheader("📥 Exportar Planilha")
+        col1, col2 = st.columns(2)
+
+        df_export = pd.DataFrame([
+            {
+                "Dia": t["dia"],
+                "Treino": t["titulo"],
+                "Duração/Volume": t["duracao_estimada"],
+                "Descrição": t["descricao"],
+                "Status": "Concluído" if t.get("concluido") else "Pendente",
+                "RPE": t.get("rpe", ""),
+                "Feedback": t.get("feedback", "")
+            }
+            for t in dados["planilha"]
+        ])
+        csv_bytes = df_export.to_csv(index=False, sep=";").encode("utf-8-sig")
+
+        texto_linhas = [f"PLANILHA DE TREINO - {nome_usuario.strip().upper()} (SEMANA {dados['semana_atual']})\n" + "="*50]
+        for t in dados["planilha"]:
+            status = "[CONCLUÍDO]" if t.get("concluido") else "[PENDENTE]"
+            texto_linhas.append(f"\n{t['dia']} - {t['titulo']} ({t['duracao_estimada']}) {status}\n{t['descricao']}")
+        texto_completo = "\n".join(texto_linhas)
+
+        with col1:
+            st.download_button(
+                label="📊 Baixar Planilha (CSV / Excel)",
+                data=csv_bytes,
+                file_name=f"planilha_{usuario_id}_semana_{dados['semana_atual']}.csv",
+                mime="text/csv"
+            )
+        with col2:
+            st.download_button(
+                label="📄 Baixar Planilha (Texto .txt)",
+                data=texto_completo,
+                file_name=f"planilha_{usuario_id}_semana_{dados['semana_atual']}.txt",
+                mime="text/plain"
+            )
+
+# ==========================================
+# ABA 2: REGISTRAR TREINO
+# ==========================================
+with aba2:
+    if not dados["planilha"]:
+        st.info("Crie ou importe sua planilha na aba **Planilha Atual** primeiro.")
+    else:
+        st.subheader("Registrar Execução e Sensação de Esforço")
+        opcoes_treinos = [f"{i+1}. {t['dia']} - {t['titulo']}" for i, t in enumerate(dados["planilha"])]
+        escolha = st.selectbox("Selecione o treino realizado:", opcoes_treinos)
+        indice = opcoes_treinos.index(escolha)
+        treino_sel = dados["planilha"][indice]
+
+        concluido = st.checkbox("Marcar treino como concluído", value=treino_sel.get("concluido", False))
+        rpe = st.slider("Percepção Subjetiva de Esforço (RPE 1 = Muito Fácil, 10 = Máximo):", 1, 10, int(treino_sel.get("rpe", 5)))
+        feedback = st.text_area("Como você se sentiu? (cansaço, dores, ritmo atingido, falta de tempo...):", value=treino_sel.get("feedback", ""))
+
+        if st.button("💾 Salvar Registro", type="primary"):
+            dados["planilha"][indice]["concluido"] = concluido
+            dados["planilha"][indice]["rpe"] = rpe
+            dados["planilha"][indice]["feedback"] = feedback
+            salvar_dados_usuario(usuario_id, dados)
+            st.success("Registro salvo na nuvem com sucesso!")
+            st.rerun()
+
+# ==========================================
+# ABA 3: EVOLUÇÃO & PRÓXIMA SEMANA
+# ==========================================
+with aba3:
+    if not dados["planilha"]:
+        st.info("Crie ou importe sua planilha na aba **Planilha Atual** primeiro.")
+    else:
+        st.subheader(f"Fechar Semana {dados['semana_atual']} e Gerar Semana {dados['semana_atual'] + 1}")
+        st.write("A IA vai analisar quais treinos você completou, seu nível de cansaço (RPE) e seus comentários para ajustar a carga da próxima semana.")
+
+        ajuste_extra = st.text_area("Algum pedido especial para a próxima semana?", placeholder="Ex: Vou viajar sexta-feira, quero focar mais em subidas...")
+
+        if st.button("🧠 Gerar Próxima Semana Adaptada", type="primary"):
+            with st.spinner("Analisando seu desempenho semanal e calculando a progressão..."):
+                resumo_semana = json.dumps(dados["planilha"], ensure_ascii=False, indent=2)
+                perfil_str = json.dumps(dados["perfil"], ensure_ascii=False)
+                prompt = f"""
+                Você é um treinador de alta performance.
+                Perfil do atleta: {perfil_str}
+                Desempenho na Semana {dados['semana_atual']}:
+                {resumo_semana}
+
+                Pedidos adicionais para a Semana {dados['semana_atual'] + 1}: {ajuste_extra or 'Nenhum'}
+
+                Com base nos treinos concluídos ou pulados, no RPE e nos feedbacks:
+                - Se o RPE esteve muito alto (8-10) ou houve cansaço/dor, reduza levemente a intensidade ou aplique semana regenerativa.
+                - Se o atleta concluiu bem com RPE controlado (4-7), aplique progressão gradual de volume ou intensidade.
+
+                Retorne EXCLUSIVAMENTE um array JSON válido com a planilha da Semana {dados['semana_atual'] + 1}, contendo as chaves:
+                - "dia": string
+                - "titulo": string
+                - "descricao": string
+                - "duracao_estimada": string
+                - "concluido": false
+                - "feedback": ""
+                - "rpe": 5
+                """
                 try:
-                    client = genai.Client(api_key=api_key)
-                    proxima_semana = dados.get("semana", 1) + 1
-                    
-                    treinos_semana = [t for t in dados["historico"] if t["semana"] == dados.get("semana", 1)]
-                    if not treinos_semana:
-                        treinos_semana = dados["historico"][-5:]
-
-                    prompt_adaptativo = (
-                        f"Você é um treinador de elite especialista em esportes de endurance. "
-                        f"Analise o desempenho na Semana {dados.get('semana', 1)} e monte a SEMANA {proxima_semana} "
-                        f"respeitando a estrutura e o estilo da planilha que o atleta já segue.\n"
-                        f"PERFIL: {json.dumps(dados['perfil'], ensure_ascii=False)}\n"
-                        f"PLANILHA ANTERIOR: {dados['planilha_atual']}\n"
-                        f"TREINOS REALIZADOS: {json.dumps(treinos_semana, ensure_ascii=False)}\n\n"
-                        f"REGRAS DE DECISÃO:\n"
-                        f"- Se PSE médio > 8 ou relato de dor/fadiga: REDUZA volume/intensidade em 15% a 25% e foque em regenerativo.\n"
-                        f"- Se PSE médio entre 5 e 7: APLIQUE PROGRESSÃO GRADUAL (+5% a 10%).\n"
-                        f"- Se PSE médio < 5: AUMENTE o estímulo com intervalados ou maior volume.\n\n"
-                        f"Comece com '### 📋 Análise do Treinador' explicando se decidiu AUMENTAR, MANTER ou REDUZIR a carga. "
-                        f"Depois mostre a tabela Markdown da SEMANA {proxima_semana} (Dia, Modalidade, Treino Detalhado, Foco)."
-                    )
-
-                    with st.spinner("Analisando fadiga, ritmo e recalculando cargas..."):
-                        texto_resposta = chamar_ia_seguro(client, prompt_adaptativo)
-                        dados["planilha_atual"] = texto_resposta
-                        dados["semana"] = proxima_semana
-                        salvar_dados(dados)
-                        st.success(f"Semana {proxima_semana} gerada com sucesso!")
-                        st.markdown(texto_resposta)
-
+                    resposta = gerar_resposta_ia(prompt)
+                    nova_planilha = extrair_json(resposta)
+                    dados["historico_semanas"].append({
+                        "semana": dados["semana_atual"],
+                        "planilha": dados["planilha"]
+                    })
+                    dados["semana_atual"] += 1
+                    dados["planilha"] = nova_planilha
+                    salvar_dados_usuario(usuario_id, dados)
+                    st.success(f"Semana {dados['semana_atual']} gerada e salva na nuvem!")
+                    st.rerun()
                 except Exception as e:
-                    st.error(f"Erro ao gerar adaptação: {e}")
+                    st.error(f"Erro ao gerar próxima semana: {e}")
