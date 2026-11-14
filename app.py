@@ -61,17 +61,38 @@ def get_gemini_client():
         return None
 
 def gerar_resposta_ia(prompt: str) -> str:
-    client = get_gemini_client()
-    if not client:
+    try:
+        api_key = st.secrets["GEMINI_API_KEY"]
+    except Exception:
         raise ValueError("Chave GEMINI_API_KEY não encontrada nos Secrets.")
-    
-    modelos = [
+
+    # Força v1beta para suportar modelos preview e atuais
+    client = genai.Client(api_key=api_key, http_options={"api_version": "v1beta"})
+
+    # Descobre automaticamente os modelos disponíveis na sua chave
+    modelos_disponiveis = []
+    try:
+        for m in client.models.list():
+            nome = m.name.replace("models/", "")
+            if "gemini" in nome and "embedding" not in nome and "imagen" not in nome:
+                modelos_disponiveis.append(nome)
+    except Exception:
+        pass
+
+    preferidos = [
+        "gemini-2.5-flash",
         "gemini-3-flash-preview",
         "gemini-3.1-flash-lite-preview",
-        "gemini-3.1-pro-preview"
+        "gemini-3.1-pro-preview",
     ]
+    candidatos = [m for m in preferidos if m in modelos_disponiveis] + [
+        m for m in modelos_disponiveis if m not in preferidos
+    ]
+    if not candidatos:
+        candidatos = preferidos
+
     erros = []
-    for modelo in modelos:
+    for modelo in candidatos[:5]:
         try:
             response = client.models.generate_content(
                 model=modelo,
@@ -82,6 +103,7 @@ def gerar_resposta_ia(prompt: str) -> str:
             erros.append(f"{modelo}: {e}")
             continue
     raise RuntimeError(" | ".join(erros))
+    
 def extrair_json(texto: str) -> list:
     texto_limpo = texto.strip()
     if "```json" in texto_limpo:
