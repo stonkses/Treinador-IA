@@ -192,6 +192,13 @@ def estrutura_padrao():
         "historico": []
     }
 
+def parse_bool_seguro(valor) -> bool:
+    if isinstance(valor, bool):
+        return valor
+    if isinstance(valor, str):
+        return valor.strip().lower() in ("true", "1", "sim", "yes", "s", "concluido", "concluído")
+    return bool(valor)
+
 def normalizar_item_treino(item: dict) -> dict:
     return {
         "dia": str(item.get("dia", "Dia")),
@@ -200,7 +207,7 @@ def normalizar_item_treino(item: dict) -> dict:
         "descricao": str(item.get("descricao") or item.get("detalhes") or item.get("prescricao") or ""),
         "duracao_ou_dist": str(item.get("duracao_ou_dist") or item.get("volume") or item.get("duracao") or "-"),
         "rpe_alvo": int(item.get("rpe_alvo", 5) or 5),
-        "concluido": bool(item.get("concluido", False)),
+        "concluido": parse_bool_seguro(item.get("concluido", False)),
         "rpe_real": int(item.get("rpe_real", 0) or 0),
         "feedback": str(item.get("feedback", ""))
     }
