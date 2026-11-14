@@ -65,7 +65,7 @@ def gerar_resposta_ia(prompt: str) -> str:
     if not client:
         raise ValueError("Chave GEMINI_API_KEY não encontrada nos Secrets.")
     
-    modelos = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    modelos = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"]
     ultimo_erro = None
     for modelo in modelos:
         try:
