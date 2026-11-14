@@ -65,8 +65,12 @@ def gerar_resposta_ia(prompt: str) -> str:
     if not client:
         raise ValueError("Chave GEMINI_API_KEY não encontrada nos Secrets.")
     
-    modelos = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"]
-    ultimo_erro = None
+    modelos = [
+        "gemini-3-flash-preview",
+        "gemini-3.1-flash-lite-preview",
+        "gemini-3.1-pro-preview"
+    ]
+    erros = []
     for modelo in modelos:
         try:
             response = client.models.generate_content(
@@ -75,10 +79,9 @@ def gerar_resposta_ia(prompt: str) -> str:
             )
             return response.text
         except Exception as e:
-            ultimo_erro = e
+            erros.append(f"{modelo}: {e}")
             continue
-    raise RuntimeError(f"Falha ao gerar resposta nos modelos disponíveis: {ultimo_erro}")
-
+    raise RuntimeError(" | ".join(erros))
 def extrair_json(texto: str) -> list:
     texto_limpo = texto.strip()
     if "```json" in texto_limpo:
