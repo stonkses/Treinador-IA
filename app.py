@@ -192,6 +192,19 @@ def estrutura_padrao():
         "historico": []
     }
 
+def normalizar_item_treino(item: dict) -> dict:
+    return {
+        "dia": str(item.get("dia", "Dia")),
+        "modalidade": str(item.get("modalidade") or item.get("esporte") or item.get("tipo") or "Treino"),
+        "titulo": str(item.get("titulo") or item.get("treino") or item.get("foco") or "Sessão"),
+        "descricao": str(item.get("descricao") or item.get("detalhes") or item.get("prescricao") or ""),
+        "duracao_ou_dist": str(item.get("duracao_ou_dist") or item.get("volume") or item.get("duracao") or "-"),
+        "rpe_alvo": int(item.get("rpe_alvo", 5) or 5),
+        "concluido": bool(item.get("concluido", False)),
+        "rpe_real": int(item.get("rpe_real", 0) or 0),
+        "feedback": str(item.get("feedback", ""))
+    }
+
 def carregar_dados_usuario(usuario: str) -> dict:
     sb = get_supabase_client()
     if not sb:
@@ -202,6 +215,8 @@ def carregar_dados_usuario(usuario: str) -> dict:
             dados = resp.data[0].get("dados") or {}
             base = estrutura_padrao()
             base.update(dados)
+            if base.get("planilha"):
+                base["planilha"] = [normalizar_item_treino(t) for t in base["planilha"]]
             return base
     except Exception as e:
         st.error(f"Erro ao carregar dados do Supabase: {e}")
