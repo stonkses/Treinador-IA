@@ -182,7 +182,7 @@ def gerar_resposta_ia(prompt: str) -> str:
     raise RuntimeError(" | ".join(erros))
 
 # ==========================================
-# PERSISTÊNCIA NA NUVEM (SUPABASE)
+# PERSISTÊNCIA E NORMALIZAÇÃO (SUPABASE)
 # ==========================================
 def estrutura_padrao():
     return {
@@ -253,20 +253,7 @@ def extrair_json_planilha(texto: str) -> list:
     if inicio != -1 and fim != -1:
         texto_limpo = texto_limpo[inicio:fim + 1]
     lista = json.loads(texto_limpo)
-    planilha_normalizada = []
-    for item in lista:
-        planilha_normalizada.append({
-            "dia": str(item.get("dia", "")),
-            "modalidade": str(item.get("modalidade", "Descanso")),
-            "titulo": str(item.get("titulo", "Descanso")),
-            "descricao": str(item.get("descricao", "")),
-            "duracao_ou_dist": str(item.get("duracao_ou_dist", "-")),
-            "rpe_alvo": int(item.get("rpe_alvo", 0) or 0),
-            "concluido": bool(item.get("concluido", False)),
-            "rpe_real": int(item.get("rpe_real", 0) or 0),
-            "feedback": str(item.get("feedback", ""))
-        })
-    return planilha_normalizada
+    return [normalizar_item_treino(item) for item in lista]
 
 def gerar_texto_whatsapp(usuario: str, semana: int, planilha: list) -> str:
     linhas = [f"⚡ *PLANILHA DE TREINOS - SEMANA {semana}* ({usuario.upper()})", ""]
@@ -543,7 +530,7 @@ else:
                 if not eh_descanso:
                     st.divider()
                     c1, c2, c3 = st.columns([1, 1.2, 2.2])
-                   with c1:
+                    with c1:
                         novo_status = st.checkbox(
                             "Treino Concluído",
                             value=item.get("concluido", False),
@@ -554,7 +541,6 @@ else:
                             dados_atleta["planilha"] = planilha_atual
                             salvar_dados_usuario(usuario_input, dados_atleta)
                             st.rerun()
-                        )
                     with c2:
                         val_rpe = item.get("rpe_real", 0) or item.get("rpe_alvo", 5) or 5
                         planilha_atual[i]["rpe_real"] = st.slider(
@@ -589,7 +575,6 @@ else:
                     with st.spinner("🤖 Analisando seu desempenho e gerando a próxima semana..."):
                         try:
                             historico = dados_atleta.get("historico", [])
-                            # Arquiva a semana completa (métricas + planilha inteira)
                             historico.append({
                                 "semana": semana_num,
                                 "data_fechamento": datetime.now().strftime("%d/%m/%Y"),
