@@ -543,11 +543,17 @@ else:
                 if not eh_descanso:
                     st.divider()
                     c1, c2, c3 = st.columns([1, 1.2, 2.2])
-                    with c1:
-                        planilha_atual[i]["concluido"] = st.checkbox(
+                   with c1:
+                        novo_status = st.checkbox(
                             "Treino Concluído",
                             value=item.get("concluido", False),
                             key=f"conc_{semana_num}_{i}"
+                        )
+                        if novo_status != item.get("concluido", False):
+                            planilha_atual[i]["concluido"] = novo_status
+                            dados_atleta["planilha"] = planilha_atual
+                            salvar_dados_usuario(usuario_input, dados_atleta)
+                            st.rerun()
                         )
                     with c2:
                         val_rpe = item.get("rpe_real", 0) or item.get("rpe_alvo", 5) or 5
