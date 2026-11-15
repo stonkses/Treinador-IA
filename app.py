@@ -1,550 +1,63 @@
 import streamlit as st
 import json
-import re
-import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta, date
-from zoneinfo import ZoneInfo
-from google import genai
-from supabase import create_client, Client
+from datetime import timedelta
 
-try:
-    from fitparse import FitFile
-    TEM_FITPARSE = True
-except ImportError:
-    TEM_FITPARSE = False
+from config import (
+    VERSAO_APP,
+    DIAS_SEMANA_ORDEM,
+    SENSACOES_OPCOES,
+    CSS_CUSTOMIZADO
+)
+from database import (
+    estrutura_padrao,
+    gerar_hash_pin,
+    verificar_pin,
+    buscar_registro_bruto,
+    salvar_dados_usuario
+)
+from ai_coach import (
+    gerar_json_ia,
+    extrair_e_validar_planilha
+)
+from parsers import processar_arquivo_atividade
+from utils import (
+    hoje_br,
+    sanitizar_html,
+    saudacao_horario,
+    obter_proxima_prova,
+    calcular_fase_periodizacao,
+    resumo_provas_para_ia,
+    gerar_texto_whatsapp,
+    gerar_arquivo_ics
+)
 
 # ==========================================
-# CONFIGURAÇÃO DA PÁGINA E VERSÃO
+# CONFIGURAÇÃO DA PÁGINA
 # ==========================================
-VERSAO_APP = "v2.0"
-
 st.set_page_config(
     page_title="Treinador • Seu Plano de Treino",
     page_icon="🏃",
     layout="wide",
     initial_sidebar_state="expanded"
 )
+st.markdown(CSS_CUSTOMIZADO, unsafe_allow_html=True)
 
 # ==========================================
-# CSS CUSTOMIZADO (VISUAL HUMANO, SUAVE E MINIMALISTA)
+# CALLBACKS DE PERSISTÊNCIA IMEDIATA (BUG 1.1 / 1.2)
 # ==========================================
-st.markdown("""
-<style>
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {background: transparent !important;}
-
-    .stApp {
-        background-color: #0F141E;
-        color: #E2E8F0;
-    }
-
-    /* Saudação e Cabeçalho Orgânico */
-    .welcome-card {
-        background: linear-gradient(135deg, #171E2E 0%, #1D2638 100%);
-        border: 1px solid #28334A;
-        border-radius: 18px;
-        padding: 24px 28px;
-        margin-bottom: 20px;
-    }
-    .welcome-title {
-        font-size: 1.75rem;
-        font-weight: 700;
-        color: #F8FAFC;
-        margin: 0;
-        letter-spacing: -0.3px;
-    }
-    .welcome-sub {
-        font-size: 0.98rem;
-        color: #94A3B8;
-        margin-top: 8px;
-        line-height: 1.5;
-    }
-    .pill-fase {
-        display: inline-block;
-        background-color: rgba(249, 115, 22, 0.14);
-        color: #FB923C;
-        border: 1px solid rgba(249, 115, 22, 0.35);
-        padding: 4px 12px;
-        border-radius: 999px;
-        font-size: 0.82rem;
-        font-weight: 600;
-        margin-top: 10px;
-    }
-
-    /* Cartões de Métricas Minimalistas */
-    div[data-testid="stMetric"] {
-        background-color: #161D2C;
-        border: 1px solid #253046;
-        border-radius: 16px;
-        padding: 16px 20px;
-    }
-    div[data-testid="stMetric"] label {
-        color: #94A3B8 !important;
-        font-size: 0.85rem !important;
-        font-weight: 500 !important;
-        text-transform: none !important;
-    }
-    div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
-        color: #F8FAFC !important;
-        font-size: 1.55rem !important;
-        font-weight: 700 !important;
-    }
-
-    /* Cartões dos Treinos */
-    div[data-testid="stExpander"] {
-        background-color: #161D2C !important;
-        border: 1px solid #253046 !important;
-        border-radius: 16px !important;
-        margin-bottom: 12px !important;
-        transition: all 0.2s ease;
-    }
-    div[data-testid="stExpander"]:hover {
-        border-color: #475569 !important;
-    }
-
-    /* Abas */
-    button[data-baseweb="tab"] {
-        font-weight: 500 !important;
-        font-size: 0.95rem !important;
-        padding: 10px 16px !important;
-    }
-    button[data-baseweb="tab"][aria-selected="true"] {
-        color: #FB923C !important;
-        font-weight: 600 !important;
-    }
-
-    /* Botões */
-    .stButton > button[kind="primary"] {
-        background-color: #F97316 !important;
-        border: none !important;
-        color: #FFFFFF !important;
-        font-weight: 600 !important;
-        border-radius: 12px !important;
-        padding: 0.6rem 1.2rem !important;
-    }
-    .stButton > button[kind="primary"]:hover {
-        background-color: #EA580C !important;
-    }
-    .stButton > button[kind="secondary"] {
-        border-radius: 12px !important;
-        border: 1px solid #2D3B55 !important;
-        background-color: #1A2234 !important;
-        color: #E2E8F0 !important;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-DIAS_SEMANA_ORDEM = [
-    "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"
-]
-
-SENSAÇÕES_OPCOES = [
-    "Ainda não fiz",
-    "Leve e tranquilo",
-    "Na medida certa",
-    "Pesado, mas deu",
-    "Exausto / Muito difícil"
-]
-
-# ==========================================
-# CONEXÕES (SUPABASE E GEMINI)
-# ==========================================
-@st.cache_resource
-def get_supabase_client() -> Client | None:
-    try:
-        url = st.secrets["SUPABASE_URL"]
-        key = st.secrets["SUPABASE_KEY"]
-        return create_client(url, key)
-    except Exception:
-        return None
-
-def gerar_resposta_ia(prompt: str) -> str:
-    try:
-        api_key = st.secrets["GEMINI_API_KEY"]
-    except Exception:
-        raise ValueError("Chave GEMINI_API_KEY não encontrada nas configurações.")
-
-    client = genai.Client(api_key=api_key, http_options={"api_version": "v1beta"})
-
-    modelos_disponiveis = []
-    try:
-        for m in client.models.list():
-            nome = m.name.replace("models/", "")
-            if "gemini" in nome and "embedding" not in nome and "imagen" not in nome:
-                modelos_disponiveis.append(nome)
-    except Exception:
-        pass
-
-    preferidos = [
-        "gemini-2.5-flash",
-        "gemini-3-flash-preview",
-        "gemini-3.1-flash-lite-preview",
-        "gemini-3.1-pro-preview",
-    ]
-    candidatos = [m for m in preferidos if m in modelos_disponiveis] + [
-        m for m in modelos_disponiveis if m not in preferidos
-    ]
-    if not candidatos:
-        candidatos = preferidos
-
-    erros = []
-    for modelo in candidatos[:5]:
-        try:
-            response = client.models.generate_content(
-                model=modelo,
-                contents=prompt
-            )
-            return response.text
-        except Exception as e:
-            erros.append(f"{modelo}: {e}")
-            continue
-    raise RuntimeError(" | ".join(erros))
-
-# ==========================================
-# PERSISTÊNCIA E NORMALIZAÇÃO
-# ==========================================
-def estrutura_padrao():
-    return {
-        "perfil": {},
-        "semana_atual": 1,
-        "planilha": [],
-        "historico": [],
-        "provas": []
-    }
-
-def parse_bool_seguro(valor) -> bool:
-    if isinstance(valor, bool):
-        return valor
-    if isinstance(valor, str):
-        return valor.strip().lower() in ("true", "1", "sim", "yes", "s", "concluido", "concluído")
-    return bool(valor)
-
-def normalizar_item_treino(item: dict) -> dict:
-    sensacao_salva = str(item.get("sensacao", ""))
-    if not sensacao_salva and item.get("rpe_real"):
-        rpe_antigo = int(item.get("rpe_real", 0))
-        if rpe_antigo <= 4:
-            sensacao_salva = "Leve e tranquilo"
-        elif rpe_antigo <= 7:
-            sensacao_salva = "Na medida certa"
-        elif rpe_antigo <= 9:
-            sensacao_salva = "Pesado, mas deu"
-        else:
-            sensacao_salva = "Exausto / Muito difícil"
-
-    return {
-        "dia": str(item.get("dia", "Dia")),
-        "modalidade": str(item.get("modalidade") or item.get("esporte") or item.get("tipo") or "Treino"),
-        "titulo": str(item.get("titulo") or item.get("treino") or item.get("foco") or "Sessão"),
-        "descricao": str(item.get("descricao") or item.get("detalhes") or item.get("prescricao") or ""),
-        "duracao_ou_dist": str(item.get("duracao_ou_dist") or item.get("volume") or item.get("duracao") or "-"),
-        "concluido": parse_bool_seguro(item.get("concluido", False)),
-        "sensacao": sensacao_salva if sensacao_salva in SENSAÇÕES_OPCOES else "Ainda não fiz",
-        "feedback": str(item.get("feedback", "")),
-        "dados_arquivo": str(item.get("dados_arquivo", ""))
-    }
-
-def carregar_dados_usuario(usuario: str) -> dict:
-    sb = get_supabase_client()
-    if not sb:
-        return estrutura_padrao()
-    try:
-        resp = sb.table("atletas").select("dados").eq("usuario", usuario).execute()
-        if resp.data and len(resp.data) > 0:
-            dados = resp.data[0].get("dados") or {}
-            base = estrutura_padrao()
-            base.update(dados)
-            if base.get("planilha"):
-                base["planilha"] = [normalizar_item_treino(t) for t in base["planilha"]]
-            if "provas" not in base or base["provas"] is None:
-                base["provas"] = []
-            return base
-    except Exception as e:
-        st.error(f"Não consegui carregar seus dados agora: {e}")
-    return estrutura_padrao()
-
-def salvar_dados_usuario(usuario: str, dados: dict):
-    sb = get_supabase_client()
-    if not sb:
+def salvar_campo_treino(idx: int, campo: str, widget_key: str):
+    usuario = st.session_state.get("usuario_atual")
+    dados = st.session_state.get("dados_atleta")
+    if not usuario or not dados:
         return
-    try:
-        sb.table("atletas").upsert({
-            "usuario": usuario,
-            "dados": dados
-        }).execute()
-    except Exception as e:
-        st.error(f"Não consegui salvar suas alterações: {e}")
+    planilha = dados.get("planilha", [])
+    if 0 <= idx < len(planilha) and widget_key in st.session_state:
+        planilha[idx][campo] = st.session_state[widget_key]
+        dados["planilha"] = planilha
+        salvar_dados_usuario(usuario, dados)
 
 # ==========================================
-# CALENDÁRIO DE PROVAS & PERIODIZAÇÃO
-# ==========================================
-def obter_proxima_prova(provas: list) -> dict | None:
-    hoje = datetime.now(ZoneInfo("America/Sao_Paulo")).date()
-    futuras = []
-    for p in provas:
-        try:
-            dt_prova = date.fromisoformat(p["data"])
-            dias_restantes = (dt_prova - hoje).days
-            if dias_restantes >= 0:
-                futuras.append({**p, "dias_restantes": dias_restantes})
-        except Exception:
-            continue
-    if not futuras:
-        return None
-    futuras.sort(key=lambda x: x["dias_restantes"])
-    return futuras[0]
-
-def calcular_fase_periodizacao(dias_restantes: int) -> tuple[str, str]:
-    if dias_restantes > 56:
-        return "Fase de Base", "Construindo resistência aeróbica e consistência sem pressa."
-    elif dias_restantes > 21:
-        return "Fase de Construção", "Aumentando o ritmo e o volume específico para a prova."
-    elif dias_restantes > 7:
-        return "Fase de Pico", "Ajustes finais de intensidade no ritmo da prova."
-    else:
-        return "Semana de Polimento", "Reduzindo o volume para você chegar leve e descansado no dia."
-
-def resumo_provas_para_ia(provas: list) -> str:
-    hoje = datetime.now(ZoneInfo("America/Sao_Paulo")).date()
-    linhas = []
-    for p in sorted(provas, key=lambda x: x.get("data", "")):
-        try:
-            dt = date.fromisoformat(p["data"])
-            dias = (dt - hoje).days
-            if dias >= 0:
-                fase, orientacao = calcular_fase_periodizacao(dias)
-                linhas.append(
-                    f"- {p['nome']} ({p['modalidade']}) em {dt.strftime('%d/%m/%Y')} "
-                    f"(faltam {dias} dias | {fase}: {orientacao})"
-                )
-        except Exception:
-            continue
-    return "\n".join(linhas) if linhas else "Nenhuma prova cadastrada no momento (foco em evolução contínua)."
-
-# ==========================================
-# LEITURA DE ARQUIVOS GARMIN / STRAVA (.FIT, .TCX, .GPX)
-# ==========================================
-def formatar_tempo(segundos: float) -> str:
-    seg = int(round(segundos))
-    horas = seg // 3600
-    minutos = (seg % 3600) // 60
-    s = seg % 60
-    if horas > 0:
-        return f"{horas}h{minutos:02d}min"
-    return f"{minutos}min{s:02d}s"
-
-def formatar_pace(segundos: float, distancia_km: float) -> str:
-    if distancia_km <= 0.05 or segundos <= 0:
-        return ""
-    pace_seg = segundos / distancia_km
-    m = int(pace_seg // 60)
-    s = int(round(pace_seg % 60))
-    if s == 60:
-        m += 1
-        s = 0
-    return f"{m}:{s:02d}/km"
-
-def processar_arquivo_atividade(uploaded_file) -> str:
-    nome = uploaded_file.name.lower()
-    conteudo_bytes = uploaded_file.getvalue()
-
-    if nome.endswith(".fit"):
-        if not TEM_FITPARSE:
-            raise ValueError("A biblioteca fitparse ainda não está instalada no servidor.")
-        fitfile = FitFile(conteudo_bytes)
-        dist_m = 0.0
-        tempo_s = 0.0
-        fc_media = None
-        esporte = "Atividade"
-
-        for record in fitfile.get_messages("session"):
-            vals = {d.name: d.value for d in record}
-            if vals.get("total_distance"):
-                dist_m = float(vals["total_distance"])
-            if vals.get("total_timer_time"):
-                tempo_s = float(vals["total_timer_time"])
-            elif vals.get("total_elapsed_time"):
-                tempo_s = float(vals["total_elapsed_time"])
-            if vals.get("avg_heart_rate"):
-                fc_media = int(vals["avg_heart_rate"])
-            if vals.get("sport"):
-                esporte = str(vals["sport"]).capitalize()
-
-        if dist_m == 0 and tempo_s == 0:
-            raise ValueError("Não encontrei dados de sessão dentro deste arquivo .fit.")
-
-        dist_km = dist_m / 1000.0
-        partes = [f"{esporte}"]
-        if dist_km > 0:
-            partes.append(f"{dist_km:.2f} km")
-        if tempo_s > 0:
-            partes.append(f"Tempo: {formatar_tempo(tempo_s)}")
-        pace = formatar_pace(tempo_s, dist_km)
-        if pace:
-            partes.append(f"Ritmo: {pace}")
-        if fc_media:
-            partes.append(f"FC média: {fc_media} bpm")
-        return " | ".join(partes)
-
-    elif nome.endswith(".tcx"):
-        root = ET.fromstring(conteudo_bytes)
-        dist_m = 0.0
-        tempo_s = 0.0
-        fcs = []
-        laps_dist = []
-        laps_time = []
-
-        for elem in root.iter():
-            tag = elem.tag.split("}")[-1]
-            if tag == "Value" and elem.text and elem.text.isdigit():
-                fcs.append(int(elem.text))
-            elif elem.tag.endswith("Lap"):
-                for child in elem:
-                    if child.tag.endswith("DistanceMeters") and child.text:
-                        laps_dist.append(float(child.text))
-                    elif child.tag.endswith("TotalTimeSeconds") and child.text:
-                        laps_time.append(float(child.text))
-
-        if laps_dist:
-            dist_m = sum(laps_dist)
-        if laps_time:
-            tempo_s = sum(laps_time)
-
-        dist_km = dist_m / 1000.0
-        partes = ["Garmin/Strava (.tcx)"]
-        if dist_km > 0:
-            partes.append(f"{dist_km:.2f} km")
-        if tempo_s > 0:
-            partes.append(f"Tempo: {formatar_tempo(tempo_s)}")
-        pace = formatar_pace(tempo_s, dist_km)
-        if pace:
-            partes.append(f"Ritmo: {pace}")
-        if fcs:
-            partes.append(f"FC média: {int(sum(fcs)/len(fcs))} bpm")
-        return " | ".join(partes)
-
-    elif nome.endswith(".gpx"):
-        import math
-        root = ET.fromstring(conteudo_bytes)
-        pontos = []
-        tempos = []
-        for elem in root.iter():
-            if elem.tag.endswith("trkpt"):
-                lat = float(elem.attrib["lat"])
-                lon = float(elem.attrib["lon"])
-                pontos.append((lat, lon))
-                for child in elem:
-                    if child.tag.endswith("time") and child.text:
-                        try:
-                            tempos.append(datetime.fromisoformat(child.text.replace("Z", "+00:00")))
-                        except Exception:
-                            pass
-
-        dist_km = 0.0
-        for idx in range(1, len(pontos)):
-            lat1, lon1 = map(math.radians, pontos[idx - 1])
-            lat2, lon2 = map(math.radians, pontos[idx])
-            dlat = lat2 - lat1
-            dlon = lon2 - lon1
-            a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
-            dist_km += 6371.0 * 2 * math.asin(math.sqrt(a))
-
-        tempo_s = (tempos[-1] - tempos[0]).total_seconds() if len(tempos) >= 2 else 0.0
-        partes = ["Strava/GPS (.gpx)"]
-        if dist_km > 0:
-            partes.append(f"{dist_km:.2f} km")
-        if tempo_s > 0:
-            partes.append(f"Tempo: {formatar_tempo(tempo_s)}")
-        pace = formatar_pace(tempo_s, dist_km)
-        if pace:
-            partes.append(f"Ritmo: {pace}")
-        return " | ".join(partes)
-
-    raise ValueError("Formato não suportado. Envie um arquivo .fit, .tcx ou .gpx.")
-
-# ==========================================
-# UTILITÁRIOS DE PLANILHA E EXPORTAÇÃO
-# ==========================================
-def extrair_json_planilha(texto: str) -> list:
-    texto_limpo = re.sub(r"```json\s*", "", texto, flags=re.IGNORECASE)
-    texto_limpo = re.sub(r"```\s*", "", texto_limpo).strip()
-    inicio = texto_limpo.find("[")
-    fim = texto_limpo.rfind("]")
-    if inicio != -1 and fim != -1:
-        texto_limpo = texto_limpo[inicio:fim + 1]
-    lista = json.loads(texto_limpo)
-    return [normalizar_item_treino(item) for item in lista]
-
-def saudacao_horario() -> str:
-    hora = datetime.now(ZoneInfo("America/Sao_Paulo")).hour
-    if 5 <= hora < 12:
-        return "Bom dia"
-    elif 12 <= hora < 18:
-        return "Boa tarde"
-    return "Boa noite"
-
-def gerar_texto_whatsapp(usuario: str, semana: int, planilha: list) -> str:
-    linhas = [f"🏃 *MEUS TREINOS — SEMANA {semana}* ({usuario.capitalize()})", ""]
-    for item in planilha:
-        status = "✅" if item.get("concluido") else "⬜"
-        if item.get("modalidade", "").lower() == "descanso":
-            linhas.append(f"😴 *{item['dia']}:* Descanso")
-        else:
-            linhas.append(
-                f"{status} *{item['dia']} — {item['modalidade']} ({item['titulo']})*\n"
-                f"   📏 {item['duracao_ou_dist']}\n"
-                f"   📝 {item['descricao']}"
-            )
-        linhas.append("")
-    return "\n".join(linhas)
-
-def gerar_arquivo_ics(usuario: str, semana: int, planilha: list) -> str:
-    hoje = datetime.now()
-    dias_ate_segunda = (7 - hoje.weekday()) % 7
-    base_segunda = hoje + timedelta(days=dias_ate_segunda)
-
-    eventos = [
-        "BEGIN:VCALENDAR",
-        "VERSION:2.0",
-        "PRODID:-//Treinador Pessoal//PT-BR//EN",
-        "CALSCALE:GREGORIAN"
-    ]
-
-    for idx, item in enumerate(planilha):
-        if item.get("modalidade", "").lower() == "descanso":
-            continue
-        dia_nome = item.get("dia", "")
-        offset = idx
-        for i, d in enumerate(DIAS_SEMANA_ORDEM):
-            if d.lower() in dia_nome.lower():
-                offset = i
-                break
-
-        data_treino = base_segunda + timedelta(days=offset)
-        dt_inicio = data_treino.strftime("%Y%m%dT070000")
-        dt_fim = data_treino.strftime("%Y%m%dT080000")
-        uid = f"treinador-{usuario}-s{semana}-{idx}-{int(hoje.timestamp())}@treinador"
-
-        summary = f"[{item['modalidade']}] {item['titulo']} ({item['duracao_ou_dist']})"
-        desc = item["descricao"].replace("\n", " ")
-
-        eventos.extend([
-            "BEGIN:VEVENT",
-            f"UID:{uid}",
-            f"DTSTAMP:{hoje.strftime('%Y%m%dT%H%M%SZ')}",
-            f"DTSTART:{dt_inicio}",
-            f"DTEND:{dt_fim}",
-            f"SUMMARY:{summary}",
-            f"DESCRIPTION:{desc}",
-            "END:VEVENT"
-        ])
-
-    eventos.append("END:VCALENDAR")
-    return "\r\n".join(eventos)
-
-# ==========================================
-# BARRA LATERAL (PERFIL E ROTINA)
+# BARRA LATERAL E AUTENTICAÇÃO (BUG 2.1)
 # ==========================================
 with st.sidebar:
     st.markdown("### 🏃 Seu Treinador")
@@ -553,24 +66,97 @@ with st.sidebar:
 
     usuario_input = st.text_input(
         "Seu nome ou apelido",
-        value=st.session_state.get("usuario_atual", ""),
+        value=st.session_state.get("usuario_digitado", ""),
         placeholder="Ex: joao"
     ).strip().lower()
+    st.session_state["usuario_digitado"] = usuario_input
 
     if not usuario_input:
-        st.info("Digite seu nome acima para abrir seus treinos.")
+        st.info("Digite seu nome acima para entrar.")
         st.caption(f"Versão {VERSAO_APP}")
         st.stop()
 
-    if st.session_state.get("usuario_atual") != usuario_input:
-        st.session_state["usuario_atual"] = usuario_input
-        st.session_state["dados_atleta"] = carregar_dados_usuario(usuario_input)
+    # Se mudou o nome digitado, reseta o estado de autenticação
+    if st.session_state.get("usuario_verificado") != usuario_input:
+        st.session_state["autenticado"] = False
+        st.session_state["usuario_verificado"] = usuario_input
+        st.session_state["registro_pendente"] = buscar_registro_bruto(usuario_input)
 
+    registro_pendente = st.session_state.get("registro_pendente")
+
+    if not st.session_state.get("autenticado"):
+        if registro_pendente is None:
+            st.markdown("**Criar novo perfil**")
+            pin_novo = st.text_input(
+                "Crie um PIN de acesso (4 dígitos)",
+                type="password",
+                max_chars=8,
+                placeholder="Ex: 1234",
+                key="pin_criar_input"
+            )
+            if st.button("Criar e entrar", type="primary", use_container_width=True):
+                if len(pin_novo.strip()) < 4:
+                    st.warning("Escolha um PIN com pelo menos 4 caracteres.")
+                else:
+                    novo_dados = estrutura_padrao(pin_hash=gerar_hash_pin(usuario_input, pin_novo))
+                    salvar_dados_usuario(usuario_input, novo_dados)
+                    st.session_state["usuario_atual"] = usuario_input
+                    st.session_state["dados_atleta"] = novo_dados
+                    st.session_state["autenticado"] = True
+                    st.rerun()
+        else:
+            hash_existente = registro_pendente.get("pin_hash", "")
+            if not hash_existente:
+                # Migração suave para contas antigas criadas antes da v2.1
+                st.markdown("**Proteja seu perfil**")
+                st.caption("Defina um PIN para proteger sua planilha.")
+                pin_migrar = st.text_input(
+                    "Defina seu PIN (mín. 4 caracteres)",
+                    type="password",
+                    max_chars=8,
+                    key="pin_migrar_input"
+                )
+                if st.button("Salvar PIN e entrar", type="primary", use_container_width=True):
+                    if len(pin_migrar.strip()) < 4:
+                        st.warning("Escolha um PIN com pelo menos 4 caracteres.")
+                    else:
+                        registro_pendente["pin_hash"] = gerar_hash_pin(usuario_input, pin_migrar)
+                        salvar_dados_usuario(usuario_input, registro_pendente)
+                        st.session_state["usuario_atual"] = usuario_input
+                        st.session_state["dados_atleta"] = registro_pendente
+                        st.session_state["autenticado"] = True
+                        st.rerun()
+            else:
+                pin_login = st.text_input(
+                    "Digite seu PIN de acesso",
+                    type="password",
+                    max_chars=8,
+                    key="pin_login_input"
+                )
+                if st.button("Entrar", type="primary", use_container_width=True):
+                    if verificar_pin(usuario_input, pin_login, hash_existente):
+                        st.session_state["usuario_atual"] = usuario_input
+                        st.session_state["dados_atleta"] = registro_pendente
+                        st.session_state["autenticado"] = True
+                        st.rerun()
+                    else:
+                        st.error("PIN incorreto.")
+
+        st.divider()
+        st.caption(f"Versão {VERSAO_APP}")
+        st.stop()
+
+    # Usuário autenticado
     dados_atleta = st.session_state["dados_atleta"]
     perfil = dados_atleta.get("perfil", {})
     provas_salvas = dados_atleta.get("provas", [])
 
-    st.caption(f"Olá, **{usuario_input.capitalize()}** • Tudo salvo automaticamente")
+    st.caption(f"Conectado como **{usuario_input.capitalize()}**")
+    if st.button("Sair", use_container_width=True):
+        st.session_state["autenticado"] = False
+        st.session_state["usuario_atual"] = ""
+        st.session_state["dados_atleta"] = {}
+        st.rerun()
 
     st.divider()
     st.markdown("**Dias que você pode treinar**")
@@ -589,9 +175,10 @@ with st.sidebar:
 
     st.divider()
     with st.expander("Recomeçar do zero"):
-        st.caption("Apaga sua planilha atual e o histórico para montar um plano novo.")
+        st.caption("Apaga sua planilha atual e o histórico mantendo seu PIN.")
         if st.button("Apagar e recomeçar", use_container_width=True):
-            st.session_state["dados_atleta"] = estrutura_padrao()
+            pin_preservado = dados_atleta.get("pin_hash", "")
+            st.session_state["dados_atleta"] = estrutura_padrao(pin_hash=pin_preservado)
             salvar_dados_usuario(usuario_input, st.session_state["dados_atleta"])
             st.rerun()
 
@@ -599,28 +186,35 @@ with st.sidebar:
     st.caption(f"Versão {VERSAO_APP}")
 
 # ==========================================
-# CABEÇALHO HUMANO NO TOPO
+# CABEÇALHO HUMANO SANITIZADO CONTRA XSS (BUG 2.2)
 # ==========================================
 semana_num = dados_atleta.get("semana_atual", 1)
 esporte_atual = perfil.get("esporte", "Treino Personalizado")
 objetivo_atual = perfil.get("objetivo", "Evoluir com consistência")
 proxima_prova = obter_proxima_prova(provas_salvas)
 
+nome_seguro = sanitizar_html(usuario_input.capitalize())
+esporte_seguro = sanitizar_html(esporte_atual)
+objetivo_seguro = sanitizar_html(objetivo_atual)
+
 if proxima_prova:
     dias_f = proxima_prova["dias_restantes"]
     fase_nome, fase_desc = calcular_fase_periodizacao(dias_f)
+    prova_nome_seguro = sanitizar_html(proxima_prova["nome"])
+    prova_mod_seguro = sanitizar_html(proxima_prova["modalidade"])
+
     texto_dias = "É hoje! Boa prova!" if dias_f == 0 else (
-        "Falta 1 dia para a prova" if dias_f == 1 else f"Faltam {dias_f} dias para {proxima_prova['nome']}"
+        "Falta 1 dia para a prova" if dias_f == 1 else f"Faltam {dias_f} dias para {prova_nome_seguro}"
     )
-    subtitulo_topo = f"{texto_dias} ({proxima_prova['modalidade']}) • {fase_desc}"
-    pill_html = f'<div class="pill-fase">Semana {semana_num} • {fase_nome} • {VERSAO_APP}</div>'
+    subtitulo_topo = f"{texto_dias} ({prova_mod_seguro}) • {sanitizar_html(fase_desc)}"
+    pill_html = f'<div class="pill-fase">Semana {semana_num} • {sanitizar_html(fase_nome)} • {VERSAO_APP}</div>'
 else:
-    subtitulo_topo = f"{esporte_atual} • Foco: {objetivo_atual}"
+    subtitulo_topo = f"{esporte_seguro} • Foco: {objetivo_seguro}"
     pill_html = f'<div class="pill-fase">Semana {semana_num} de treino • {VERSAO_APP}</div>'
 
 st.markdown(f"""
 <div class="welcome-card">
-    <div class="welcome-title">{saudacao_horario()}, {usuario_input.capitalize()}! 👋</div>
+    <div class="welcome-title">{saudacao_horario()}, {nome_seguro}! 👋</div>
     <div class="welcome-sub">{subtitulo_topo}</div>
     {pill_html}
 </div>
@@ -653,7 +247,7 @@ if not planilha_atual:
         with c_p2:
             prova_init_mod = st.text_input("Distância / Modalidade", placeholder="Ex: 5 km ou SuperSprint", key="p_init_mod")
         with c_p3:
-            prova_init_data = st.date_input("Data da prova", value=date.today() + timedelta(days=45), min_value=date.today(), key="p_init_data")
+            prova_init_data = st.date_input("Data da prova", value=hoje_br() + timedelta(days=45), min_value=hoje_br(), key="p_init_data")
 
         if st.button("Montar minha primeira semana", type="primary", use_container_width=True):
             if not dias_selecionados:
@@ -684,14 +278,14 @@ Você é um treinador humano, atencioso e experiente. Monte os treinos da Semana
 {info_provas}
 
 REGRAS:
-1. Retorne os 7 dias da semana na ordem: Segunda, Terça, Quarta, Quinta, Sexta, Sábado, Domingo.
+1. Retorne os 7 dias da semana na ordem exata: Segunda, Terça, Quarta, Quinta, Sexta, Sábado, Domingo.
 2. Coloque treino APENAS nos dias disponíveis ({', '.join(dias_selecionados)}). Nos outros dias, use "modalidade": "Descanso" e "titulo": "Dia de descanso".
-3. Escreva as descrições em linguagem humana, clara e encorajadora (aquecimento, treino principal e volta à calma), sem jargões robóticos.
-4. Retorne EXCLUSIVAMENTE um array JSON válido (sem texto fora do JSON) com as chaves:
+3. Escreva as descrições em linguagem humana, clara e encorajadora (aquecimento, treino principal e volta à calma).
+4. Retorne EXCLUSIVAMENTE um array JSON com 7 objetos contendo as chaves:
    "dia", "modalidade", "titulo", "descricao", "duracao_ou_dist"
 """
-                        resposta = gerar_resposta_ia(prompt)
-                        nova_planilha = extrair_json_planilha(resposta)
+                        resposta = gerar_json_ia(prompt)
+                        nova_planilha = extrair_e_validar_planilha(resposta)
                         dados_atleta["perfil"] = {
                             "esporte": esporte,
                             "nivel": nivel,
@@ -723,11 +317,11 @@ Organize a planilha abaixo nos 7 dias da semana (Segunda a Domingo).
 Planilha:
 {texto_importado}
 
-Retorne EXCLUSIVAMENTE um array JSON válido com 7 objetos (Segunda a Domingo) e as chaves:
+Retorne EXCLUSIVAMENTE um array JSON com 7 objetos (Segunda a Domingo) e as chaves:
 "dia", "modalidade", "titulo", "descricao", "duracao_ou_dist"
 """
-                        resposta = gerar_resposta_ia(prompt)
-                        nova_planilha = extrair_json_planilha(resposta)
+                        resposta = gerar_json_ia(prompt)
+                        nova_planilha = extrair_e_validar_planilha(resposta)
                         dados_atleta["perfil"] = {
                             "esporte": esporte_imp,
                             "nivel": "Intermediário",
@@ -750,7 +344,6 @@ else:
     progresso_ratio = (len(concluidos) / len(treinos_ativos)) if treinos_ativos else 0.0
     taxa_adesao = int(round(progresso_ratio * 100))
 
-    # 3 Cartões minimalistas (sem RPE)
     m1, m2, m3 = st.columns(3)
     m1.metric("Treinos concluídos", f"{len(concluidos)} de {len(treinos_ativos)}")
     m2.metric("Consistência da semana", f"{taxa_adesao}%")
@@ -792,31 +385,38 @@ else:
                     st.divider()
                     c1, c2 = st.columns([1, 1.5])
                     with c1:
-                        novo_status = st.checkbox(
+                        k_conc = f"conc_{semana_num}_{i}"
+                        st.checkbox(
                             "Já fiz esse treino",
                             value=item.get("concluido", False),
-                            key=f"conc_{semana_num}_{i}"
+                            key=k_conc,
+                            on_change=salvar_campo_treino,
+                            args=(i, "concluido", k_conc)
                         )
-                        if novo_status != item.get("concluido", False):
-                            planilha_atual[i]["concluido"] = novo_status
-                            dados_atleta["planilha"] = planilha_atual
-                            salvar_dados_usuario(usuario_input, dados_atleta)
-                            st.rerun()
 
                     with c2:
-                        idx_sens = SENSAÇÕES_OPCOES.index(item.get("sensacao", "Ainda não fiz")) if item.get("sensacao") in SENSAÇÕES_OPCOES else 0
-                        planilha_atual[i]["sensacao"] = st.selectbox(
+                        k_sens = f"sens_{semana_num}_{i}"
+                        idx_sens = (
+                            SENSACOES_OPCOES.index(item.get("sensacao", "Ainda não fiz"))
+                            if item.get("sensacao") in SENSACOES_OPCOES else 0
+                        )
+                        st.selectbox(
                             "Como você se sentiu?",
-                            options=SENSAÇÕES_OPCOES,
+                            options=SENSACOES_OPCOES,
                             index=idx_sens,
-                            key=f"sens_{semana_num}_{i}"
+                            key=k_sens,
+                            on_change=salvar_campo_treino,
+                            args=(i, "sensacao", k_sens)
                         )
 
-                    planilha_atual[i]["feedback"] = st.text_input(
+                    k_fb = f"fb_{semana_num}_{i}"
+                    st.text_input(
                         "Anotações sobre o treino (opcional)",
                         value=item.get("feedback", ""),
                         placeholder="Ex: Consegui manter o ritmo no final, me senti bem...",
-                        key=f"fb_{semana_num}_{i}"
+                        key=k_fb,
+                        on_change=salvar_campo_treino,
+                        args=(i, "feedback", k_fb)
                     )
 
                     arquivo_up = st.file_uploader(
@@ -826,9 +426,10 @@ else:
                     )
                     if arquivo_up is not None:
                         try:
-                            resumo_arq = processar_arquivo_atividade(arquivo_up)
-                            if planilha_atual[i].get("dados_arquivo") != resumo_arq:
+                            resumo_arq, arq_hash = processar_arquivo_atividade(arquivo_up)
+                            if planilha_atual[i].get("arquivo_hash") != arq_hash:
                                 planilha_atual[i]["dados_arquivo"] = resumo_arq
+                                planilha_atual[i]["arquivo_hash"] = arq_hash
                                 planilha_atual[i]["concluido"] = True
                                 if planilha_atual[i]["sensacao"] == "Ainda não fiz":
                                     planilha_atual[i]["sensacao"] = "Na medida certa"
@@ -856,7 +457,7 @@ else:
                             historico = dados_atleta.get("historico", [])
                             historico.append({
                                 "semana": semana_num,
-                                "data_fechamento": datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%d/%m/%Y"),
+                                "data_fechamento": hoje_br().strftime("%d/%m/%Y"),
                                 "adesao": taxa_adesao,
                                 "treinos_concluidos": len(concluidos),
                                 "treinos_totais": len(treinos_ativos),
@@ -885,10 +486,10 @@ COMO PLANEJAR A PRÓXIMA SEMANA:
 - Se o aluno completou bem e se sentiu leve/na medida, evolua gradualmente.
 - Se relatou cansaço, treino pesado/exausto ou faltou a treinos, segure um pouco a carga para ele recuperar bem.
 - Coloque treinos APENAS nos dias selecionados ({', '.join(dias_selecionados)}). Nos outros dias, coloque "modalidade": "Descanso".
-- Retorne EXCLUSIVAMENTE um array JSON válido com os 7 dias (Segunda a Domingo) e as chaves: "dia", "modalidade", "titulo", "descricao", "duracao_ou_dist".
+- Retorne EXCLUSIVAMENTE um array JSON com 7 objetos (Segunda a Domingo) e as chaves: "dia", "modalidade", "titulo", "descricao", "duracao_ou_dist".
 """
-                            resposta = gerar_resposta_ia(prompt)
-                            proxima_planilha = extrair_json_planilha(resposta)
+                            resposta = gerar_json_ia(prompt)
+                            proxima_planilha = extrair_e_validar_planilha(resposta)
 
                             dados_atleta["historico"] = historico
                             dados_atleta["semana_atual"] = semana_num + 1
@@ -912,7 +513,7 @@ COMO PLANEJAR A PRÓXIMA SEMANA:
             with cp2:
                 nova_prova_mod = st.text_input("Modalidade / Distância", placeholder="Ex: Corrida 21 km / Triathlon")
             with cp3:
-                nova_prova_data = st.date_input("Data", value=date.today() + timedelta(days=30), min_value=date.today())
+                nova_prova_data = st.date_input("Data", value=hoje_br() + timedelta(days=30), min_value=hoje_br())
 
             if st.form_submit_button("Adicionar ao calendário", type="primary"):
                 if not nova_prova_nome.strip():
@@ -930,7 +531,7 @@ COMO PLANEJAR A PRÓXIMA SEMANA:
 
         st.divider()
         if provas_salvas:
-            hoje = datetime.now(ZoneInfo("America/Sao_Paulo")).date()
+            hoje = hoje_br()
             provas_ordenadas = sorted(provas_salvas, key=lambda x: x.get("data", ""))
 
             for idx_p, p in enumerate(provas_ordenadas):
@@ -996,12 +597,12 @@ Pedido do aluno:
 "{pedido_ajuste}"
 
 REGRAS:
-1. Ajuste APENAS os dias necessários para atender o aluno, mantendo intactos os treinos já feitos ("concluido", "sensacao", "feedback", "dados_arquivo").
+1. Ajuste APENAS os dias necessários para atender o aluno, mantendo intactos os treinos já feitos ("concluido", "sensacao", "feedback", "dados_arquivo", "arquivo_hash").
 2. Mantenha os 7 dias da semana (Segunda a Domingo).
-3. Retorne EXCLUSIVAMENTE o array JSON atualizado com as chaves: "dia", "modalidade", "titulo", "descricao", "duracao_ou_dist", "concluido", "sensacao", "feedback", "dados_arquivo".
+3. Retorne EXCLUSIVAMENTE o array JSON atualizado com 7 objetos e as chaves: "dia", "modalidade", "titulo", "descricao", "duracao_ou_dist", "concluido", "sensacao", "feedback", "dados_arquivo", "arquivo_hash".
 """
-                        resposta = gerar_resposta_ia(prompt_ajuste)
-                        planilha_ajustada = extrair_json_planilha(resposta)
+                        resposta = gerar_json_ia(prompt_ajuste)
+                        planilha_ajustada = extrair_e_validar_planilha(resposta)
                         dados_atleta["planilha"] = planilha_ajustada
                         salvar_dados_usuario(usuario_input, dados_atleta)
                         st.success("Pronto! Já atualizei seus treinos.")
