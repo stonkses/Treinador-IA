@@ -14,8 +14,10 @@ except ImportError:
     TEM_FITPARSE = False
 
 # ==========================================
-# CONFIGURAÇÃO DA PÁGINA
+# CONFIGURAÇÃO DA PÁGINA E VERSÃO
 # ==========================================
+VERSAO_APP = "v2.0"
+
 st.set_page_config(
     page_title="Treinador • Seu Plano de Treino",
     page_icon="🏃",
@@ -390,26 +392,20 @@ def processar_arquivo_atividade(uploaded_file) -> str:
         dist_m = 0.0
         tempo_s = 0.0
         fcs = []
-        for elem in root.iter():
-            tag = elem.tag.split("}")[-1]
-            if tag == "DistanceMeters" and elem.text:
-                # Pega totais de Lap ou último valor acumulado
-                dist_m += float(elem.text) if elem.getparent is None else 0.0
-            elif tag == "TotalTimeSeconds" and elem.text:
-                tempo_s += float(elem.text)
-            elif tag == "Value" and elem.text and elem.text.isdigit():
-                fcs.append(int(elem.text))
-
-        # Releitura segura por Lap no TCX
         laps_dist = []
         laps_time = []
+
         for elem in root.iter():
-            if elem.tag.endswith("Lap"):
+            tag = elem.tag.split("}")[-1]
+            if tag == "Value" and elem.text and elem.text.isdigit():
+                fcs.append(int(elem.text))
+            elif elem.tag.endswith("Lap"):
                 for child in elem:
                     if child.tag.endswith("DistanceMeters") and child.text:
                         laps_dist.append(float(child.text))
                     elif child.tag.endswith("TotalTimeSeconds") and child.text:
                         laps_time.append(float(child.text))
+
         if laps_dist:
             dist_m = sum(laps_dist)
         if laps_time:
@@ -563,6 +559,7 @@ with st.sidebar:
 
     if not usuario_input:
         st.info("Digite seu nome acima para abrir seus treinos.")
+        st.caption(f"Versão {VERSAO_APP}")
         st.stop()
 
     if st.session_state.get("usuario_atual") != usuario_input:
@@ -598,6 +595,9 @@ with st.sidebar:
             salvar_dados_usuario(usuario_input, st.session_state["dados_atleta"])
             st.rerun()
 
+    st.divider()
+    st.caption(f"Versão {VERSAO_APP}")
+
 # ==========================================
 # CABEÇALHO HUMANO NO TOPO
 # ==========================================
@@ -613,10 +613,10 @@ if proxima_prova:
         "Falta 1 dia para a prova" if dias_f == 1 else f"Faltam {dias_f} dias para {proxima_prova['nome']}"
     )
     subtitulo_topo = f"{texto_dias} ({proxima_prova['modalidade']}) • {fase_desc}"
-    pill_html = f'<div class="pill-fase">Semana {semana_num} • {fase_nome}</div>'
+    pill_html = f'<div class="pill-fase">Semana {semana_num} • {fase_nome} • {VERSAO_APP}</div>'
 else:
     subtitulo_topo = f"{esporte_atual} • Foco: {objetivo_atual}"
-    pill_html = f'<div class="pill-fase">Semana {semana_num} de treino</div>'
+    pill_html = f'<div class="pill-fase">Semana {semana_num} de treino • {VERSAO_APP}</div>'
 
 st.markdown(f"""
 <div class="welcome-card">
