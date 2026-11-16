@@ -48,20 +48,38 @@ def calcular_fase_periodizacao(dias_restantes: int) -> tuple[str, str]:
 
 def resumo_provas_para_ia(provas: list) -> str:
     hoje = hoje_br()
-    linhas = []
+    futuras = []
+    realizadas = []
+
     for p in sorted(provas, key=lambda x: x.get("data", "")):
         try:
             dt = date.fromisoformat(p["data"])
             dias = (dt - hoje).days
             if dias >= 0:
                 fase, orientacao = calcular_fase_periodizacao(dias)
-                linhas.append(
-                    f"- {p['nome']} ({p['modalidade']}) em {dt.strftime('%d/%m/%Y')} "
+                futuras.append(
+                    f"- [ALVO] {p['nome']} ({p['modalidade']}) em {dt.strftime('%d/%m/%Y')} "
                     f"(faltam {dias} dias | {fase}: {orientacao})"
+                )
+            else:
+                tempo_txt = f" | Tempo oficial: {p['tempo_prova']}" if p.get("tempo_prova") else ""
+                pr_txt = " (PR / Recorde Pessoal!)" if p.get("eh_pr") else ""
+                realizadas.append(
+                    f"- [REALIZADA] {p['nome']} ({p['modalidade']}) em {dt.strftime('%d/%m/%Y')}{tempo_txt}{pr_txt}"
                 )
         except Exception:
             continue
-    return "\n".join(linhas) if linhas else "Nenhuma prova cadastrada no momento (foco em evolução contínua)."
+
+    partes = []
+    if futuras:
+        partes.append("Próximas provas alvo:\n" + "\n".join(futuras))
+    else:
+        partes.append("Nenhuma prova futura cadastrada no momento (foco em evolução contínua).")
+
+    if realizadas:
+        partes.append("Histórico de provas já realizadas pelo aluno:\n" + "\n".join(realizadas))
+
+    return "\n\n".join(partes)
 
 def gerar_texto_whatsapp(usuario: str, semana: int, planilha: list) -> str:
     linhas = [f"🏃 *MEUS TREINOS — SEMANA {semana}* ({usuario.capitalize()})", ""]
@@ -93,7 +111,6 @@ def gerar_arquivo_ics(usuario: str, semana: int, planilha: list) -> str:
     agora_utc = agora.astimezone(ZoneInfo("UTC"))
     hoje = agora.date()
 
-    # Se hoje é segunda (weekday == 0), usa esta semana; caso contrário, próxima segunda
     dias_ate_segunda = (7 - hoje.weekday()) % 7
     base_segunda = hoje + timedelta(days=dias_ate_segunda)
 
