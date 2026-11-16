@@ -1,6 +1,6 @@
 import streamlit as st
 import json
-from datetime import timedelta
+from datetime import timedelta, date
 
 from config import (
     VERSAO_APP,
@@ -43,7 +43,7 @@ st.set_page_config(
 st.markdown(CSS_CUSTOMIZADO, unsafe_allow_html=True)
 
 # ==========================================
-# CALLBACKS DE PERSISTÊNCIA IMEDIATA (BUG 1.1 / 1.2)
+# CALLBACKS DE PERSISTÊNCIA IMEDIATA
 # ==========================================
 def salvar_campo_treino(idx: int, campo: str, widget_key: str):
     usuario = st.session_state.get("usuario_atual")
@@ -57,7 +57,7 @@ def salvar_campo_treino(idx: int, campo: str, widget_key: str):
         salvar_dados_usuario(usuario, dados)
 
 # ==========================================
-# BARRA LATERAL E AUTENTICAÇÃO (BUG 2.1)
+# BARRA LATERAL E AUTENTICAÇÃO
 # ==========================================
 with st.sidebar:
     st.markdown("### 🏃 Seu Treinador")
@@ -76,7 +76,6 @@ with st.sidebar:
         st.caption(f"Versão {VERSAO_APP}")
         st.stop()
 
-    # Se mudou o nome digitado, reseta o estado de autenticação
     if st.session_state.get("usuario_verificado") != usuario_input:
         st.session_state["autenticado"] = False
         st.session_state["usuario_verificado"] = usuario_input
@@ -107,7 +106,6 @@ with st.sidebar:
         else:
             hash_existente = registro_pendente.get("pin_hash", "")
             if not hash_existente:
-                # Migração suave para contas antigas criadas antes da v2.1
                 st.markdown("**Proteja seu perfil**")
                 st.caption("Defina um PIN para proteger sua planilha.")
                 pin_migrar = st.text_input(
@@ -146,7 +144,6 @@ with st.sidebar:
         st.caption(f"Versão {VERSAO_APP}")
         st.stop()
 
-    # Usuário autenticado
     dados_atleta = st.session_state["dados_atleta"]
     perfil = dados_atleta.get("perfil", {})
     provas_salvas = dados_atleta.get("provas", [])
@@ -186,7 +183,7 @@ with st.sidebar:
     st.caption(f"Versão {VERSAO_APP}")
 
 # ==========================================
-# CABEÇALHO HUMANO SANITIZADO CONTRA XSS (BUG 2.2)
+# CABEÇALHO HUMANO SANITIZADO CONTRA XSS
 # ==========================================
 semana_num = dados_atleta.get("semana_atual", 1)
 esporte_atual = perfil.get("esporte", "Treino Personalizado")
@@ -260,7 +257,9 @@ if not planilha_atual:
                             provas_iniciais.append({
                                 "nome": prova_init_nome.strip(),
                                 "modalidade": prova_init_mod.strip() or esporte,
-                                "data": prova_init_data.isoformat()
+                                "data": prova_init_data.isoformat(),
+                                "tempo_prova": "",
+                                "eh_pr": False
                             })
 
                         dias_descanso = [d for d in DIAS_SEMANA_ORDEM if d not in dias_selecionados]
@@ -472,7 +471,7 @@ else:
 Você é um treinador humano, próximo e atento. Analise como foi a Semana {semana_num} deste aluno e monte os treinos da Semana {semana_num + 1}.
 
 Perfil do aluno: {json.dumps(dados_atleta.get('perfil', {}), ensure_ascii=False)}
-Calendário de provas alvo (ajuste a periodização, volume e intensidade pensando nestas datas):
+Calendário de provas alvo e histórico de resultados (ajuste a periodização, volume e ritmos pensando nestas datas e tempos):
 {info_provas}
 
 Dias disponíveis para treinar na Semana {semana_num + 1}: {', '.join(dias_selecionados)}
@@ -500,11 +499,11 @@ COMO PLANEJAR A PRÓXIMA SEMANA:
                             st.error(f"Não consegui gerar a próxima semana agora: {e}")
 
     # ------------------------------------------
-    # ABA 2: CALENDÁRIO DE PROVAS
+    # ABA 2: CALENDÁRIO DE PROVAS + TEMPO & PR
     # ------------------------------------------
     with tab_provas:
         st.subheader("🏆 Suas Provas Alvo")
-        st.write("Cadastre as provas que você pretende fazer. Eu organizo seus treinos automaticamente para você chegar preparado no dia.")
+        st.write("Cadastre as provas que você vai fazer (ou já fez). As futuras guiam seus treinos; nas passadas você pode registrar seu tempo e PR.")
 
         with st.form("form_nova_prova", clear_on_submit=True):
             cp1, cp2, cp3 = st.columns([2, 1.5, 1.2])
@@ -513,7 +512,7 @@ COMO PLANEJAR A PRÓXIMA SEMANA:
             with cp2:
                 nova_prova_mod = st.text_input("Modalidade / Distância", placeholder="Ex: Corrida 21 km / Triathlon")
             with cp3:
-                nova_prova_data = st.date_input("Data", value=hoje_br() + timedelta(days=30), min_value=hoje_br())
+                nova_prova_data = st.date_input("Data", value=hoje_br() + timedelta(days=30))
 
             if st.form_submit_button("Adicionar ao calendário", type="primary"):
                 if not nova_prova_nome.strip():
@@ -522,11 +521,13 @@ COMO PLANEJAR A PRÓXIMA SEMANA:
                     provas_salvas.append({
                         "nome": nova_prova_nome.strip(),
                         "modalidade": nova_prova_mod.strip() or esporte_atual,
-                        "data": nova_prova_data.isoformat()
+                        "data": nova_prova_data.isoformat(),
+                        "tempo_prova": "",
+                        "eh_pr": False
                     })
                     dados_atleta["provas"] = provas_salvas
                     salvar_dados_usuario(usuario_input, dados_atleta)
-                    st.success("Prova adicionada! Seus próximos treinos já vão considerar essa data.")
+                    st.success("Prova adicionada ao calendário!")
                     st.rerun()
 
         st.divider()
@@ -540,28 +541,73 @@ COMO PLANEJAR A PRÓXIMA SEMANA:
                     dias_rest = (dt_p - hoje).days
                     data_fmt = dt_p.strftime("%d/%m/%Y")
                 except Exception:
-                    dias_rest = -1
+                    dias_rest = 0
                     data_fmt = p.get("data", "")
 
-                col_info, col_del = st.columns([4, 1])
-                with col_info:
-                    if dias_rest >= 0:
+                # PROVA FUTURA OU HOJE
+                if dias_rest >= 0:
+                    col_info, col_del = st.columns([4, 1])
+                    with col_info:
                         fase_p, desc_p = calcular_fase_periodizacao(dias_rest)
-                        contagem = "É hoje!" if dias_rest == 0 else f"Faltam {dias_rest} dias"
+                        contagem = "É hoje! Boa prova!" if dias_rest == 0 else (
+                            "Falta 1 dia" if dias_rest == 1 else f"Faltam {dias_rest} dias"
+                        )
                         st.markdown(
-                            f"**{p['nome']}** ({p['modalidade']}) — 📅 {data_fmt}  \n"
+                            f"🎯 **{p['nome']}** ({p['modalidade']}) — 📅 {data_fmt}  \n"
                             f"⏳ **{contagem}** • *{fase_p}:* {desc_p}"
                         )
-                    else:
-                        st.markdown(f"**{p['nome']}** ({p['modalidade']}) — 📅 {data_fmt} *(Prova já realizada)*")
+                    with col_del:
+                        if st.button("Remover", key=f"del_prova_{idx_p}", use_container_width=True):
+                            provas_salvas.remove(p)
+                            dados_atleta["provas"] = provas_salvas
+                            salvar_dados_usuario(usuario_input, dados_atleta)
+                            st.rerun()
 
-                with col_del:
-                    if st.button("Remover", key=f"del_prova_{idx_p}", use_container_width=True):
-                        provas_salvas.remove(p)
-                        dados_atleta["provas"] = provas_salvas
-                        salvar_dados_usuario(usuario_input, dados_atleta)
-                        st.rerun()
-                st.write("")
+                # PROVA JÁ REALIZADA (COM REGISTRO DE TEMPO E PR)
+                else:
+                    col_info, col_del = st.columns([4, 1])
+                    with col_info:
+                        badge_pr = " • 🏆 **PR (Recorde Pessoal)!**" if p.get("eh_pr") else ""
+                        tempo_atual_txt = f" • ⏱️ Tempo: **{p['tempo_prova']}**" if p.get("tempo_prova") else ""
+                        st.markdown(
+                            f"✅ **{p['nome']}** ({p['modalidade']}) — 📅 {data_fmt} *(Prova já realizada)*{tempo_atual_txt}{badge_pr}"
+                        )
+                    with col_del:
+                        if st.button("Remover", key=f"del_prova_{idx_p}", use_container_width=True):
+                            provas_salvas.remove(p)
+                            dados_atleta["provas"] = provas_salvas
+                            salvar_dados_usuario(usuario_input, dados_atleta)
+                            st.rerun()
+
+                    with st.expander("⏱️ Registrar / editar tempo de prova e PR", expanded=not bool(p.get("tempo_prova"))):
+                        ct1, ct2, ct3 = st.columns([2, 1.3, 1])
+                        with ct1:
+                            novo_tempo = st.text_input(
+                                "Seu tempo oficial",
+                                value=p.get("tempo_prova", ""),
+                                placeholder="Ex: 00:24:35 ou 1h48min",
+                                key=f"tempo_prova_{idx_p}"
+                            )
+                        with ct2:
+                            st.write("")
+                            st.write("")
+                            novo_pr = st.checkbox(
+                                "🏆 Foi meu PR!",
+                                value=bool(p.get("eh_pr", False)),
+                                key=f"pr_prova_{idx_p}"
+                            )
+                        with ct3:
+                            st.write("")
+                            st.write("")
+                            if st.button("Salvar resultado", key=f"save_res_{idx_p}", type="primary", use_container_width=True):
+                                p["tempo_prova"] = novo_tempo.strip()
+                                p["eh_pr"] = novo_pr
+                                dados_atleta["provas"] = provas_salvas
+                                salvar_dados_usuario(usuario_input, dados_atleta)
+                                st.success("Resultado salvo!")
+                                st.rerun()
+
+                st.divider()
         else:
             st.info("Você ainda não marcou nenhuma prova. Cadastre uma acima para ativar a preparação específica!")
 
