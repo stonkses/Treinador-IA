@@ -1,6 +1,6 @@
 from zoneinfo import ZoneInfo
 
-VERSAO_APP = "v2.1"
+VERSAO_APP = "v2.2"
 FUSO_BR = ZoneInfo("America/Sao_Paulo")
 
 DIAS_SEMANA_ORDEM = [
