@@ -1,104 +1,110 @@
 import html
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
-from config import DIAS_SEMANA_ORDEM, FUSO_BR
+from config import DIAS_SEMANA, TZ_BR
 
-def agora_br() -> datetime:
-    return datetime.now(FUSO_BR)
 
-def hoje_br() -> date:
-    return agora_br().date()
+def now_br() -> datetime:
+    return datetime.now(TZ_BR)
 
-def sanitizar_html(texto: str) -> str:
-    return html.escape(str(texto or ""), quote=True)
 
-def saudacao_horario() -> str:
-    hora = agora_br().hour
-    if 5 <= hora < 12:
+def today_br() -> date:
+    return now_br().date()
+
+
+def esc(text: str) -> str:
+    return html.escape(str(text or ""), quote=True)
+
+
+def greeting_br() -> str:
+    hour = now_br().hour
+    if 5 <= hour < 12:
         return "Bom dia"
-    elif 12 <= hora < 18:
+    if 12 <= hour < 18:
         return "Boa tarde"
     return "Boa noite"
 
-def obter_proxima_prova(provas: list) -> dict | None:
-    hoje = hoje_br()
-    futuras = []
+
+def get_next_race(provas: list[dict]) -> dict | None:
+    today = today_br()
+    upcoming = []
     for p in provas:
         try:
-            dt_prova = date.fromisoformat(p["data"])
-            dias_restantes = (dt_prova - hoje).days
-            if dias_restantes >= 0:
-                futuras.append({**p, "dias_restantes": dias_restantes})
+            race_dt = date.fromisoformat(p["data"])
+            diff = (race_dt - today).days
+            if diff >= 0:
+                upcoming.append({**p, "dias_restantes": diff})
         except Exception:
             continue
-    if not futuras:
-        return None
-    futuras.sort(key=lambda x: x["dias_restantes"])
-    return futuras[0]
+    upcoming.sort(key=lambda x: x["dias_restantes"])
+    return upcoming[0] if upcoming else None
 
-def calcular_fase_periodizacao(dias_restantes: int) -> tuple[str, str]:
-    if dias_restantes > 56:
+
+def get_periodization_phase(days_left: int) -> tuple[str, str]:
+    if days_left > 56:
         return "Fase de Base", "Construindo resistência aeróbica e consistência sem pressa."
-    elif dias_restantes > 21:
+    if days_left > 21:
         return "Fase de Construção", "Aumentando o ritmo e o volume específico para a prova."
-    elif dias_restantes > 7:
+    if days_left > 7:
         return "Fase de Pico", "Ajustes finais de intensidade no ritmo da prova."
-    else:
-        return "Semana de Polimento", "Reduzindo o volume para você chegar leve e descansado no dia."
+    return "Semana de Polimento", "Reduzindo o volume para você chegar leve e descansado no dia."
 
-def resumo_provas_para_ia(provas: list) -> str:
-    hoje = hoje_br()
-    futuras = []
-    realizadas = []
+
+def build_races_context(provas: list[dict]) -> str:
+    today = today_br()
+    upcoming = []
+    completed = []
 
     for p in sorted(provas, key=lambda x: x.get("data", "")):
         try:
             dt = date.fromisoformat(p["data"])
-            dias = (dt - hoje).days
-            if dias >= 0:
-                fase, orientacao = calcular_fase_periodizacao(dias)
-                futuras.append(
+            diff = (dt - today).days
+            if diff >= 0:
+                phase, guidance = get_periodization_phase(diff)
+                upcoming.append(
                     f"- [ALVO] {p['nome']} ({p['modalidade']}) em {dt.strftime('%d/%m/%Y')} "
-                    f"(faltam {dias} dias | {fase}: {orientacao})"
+                    f"(faltam {diff} dias | {phase}: {guidance})"
                 )
             else:
-                tempo_txt = f" | Tempo oficial: {p['tempo_prova']}" if p.get("tempo_prova") else ""
-                pr_txt = " (PR / Recorde Pessoal!)" if p.get("eh_pr") else ""
-                realizadas.append(
-                    f"- [REALIZADA] {p['nome']} ({p['modalidade']}) em {dt.strftime('%d/%m/%Y')}{tempo_txt}{pr_txt}"
+                time_str = f" | Tempo oficial: {p['tempo_prova']}" if p.get("tempo_prova") else ""
+                pr_str = " (PR / Recorde Pessoal!)" if p.get("eh_pr") else ""
+                completed.append(
+                    f"- [REALIZADA] {p['nome']} ({p['modalidade']}) em {dt.strftime('%d/%m/%Y')}{time_str}{pr_str}"
                 )
         except Exception:
             continue
 
-    partes = []
-    if futuras:
-        partes.append("Próximas provas alvo:\n" + "\n".join(futuras))
+    blocks = []
+    if upcoming:
+        blocks.append("Próximas provas alvo:\n" + "\n".join(upcoming))
     else:
-        partes.append("Nenhuma prova futura cadastrada no momento (foco em evolução contínua).")
+        blocks.append("Nenhuma prova futura cadastrada no momento (foco em evolução contínua).")
 
-    if realizadas:
-        partes.append("Histórico de provas já realizadas pelo aluno:\n" + "\n".join(realizadas))
+    if completed:
+        blocks.append("Histórico de provas já realizadas pelo aluno:\n" + "\n".join(completed))
 
-    return "\n\n".join(partes)
+    return "\n\n".join(blocks)
 
-def gerar_texto_whatsapp(usuario: str, semana: int, planilha: list) -> str:
-    linhas = [f"🏃 *MEUS TREINOS — SEMANA {semana}* ({usuario.capitalize()})", ""]
+
+def format_whatsapp_plan(usuario: str, semana: int, planilha: list[dict]) -> str:
+    lines = [f"🏃 *MEUS TREINOS — SEMANA {semana}* ({usuario.capitalize()})", ""]
     for item in planilha:
-        status = "✅" if item.get("concluido") else "⬜"
+        done = "✅" if item.get("concluido") else "⬜"
         if item.get("modalidade", "").lower() == "descanso":
-            linhas.append(f"😴 *{item['dia']}:* Descanso")
+            lines.append(f"😴 *{item['dia']}:* Descanso")
         else:
-            linhas.append(
-                f"{status} *{item['dia']} — {item['modalidade']} ({item['titulo']})*\n"
+            lines.append(
+                f"{done} *{item['dia']} — {item['modalidade']} ({item['titulo']})*\n"
                 f"   📏 {item['duracao_ou_dist']}\n"
                 f"   📝 {item['descricao']}"
             )
-        linhas.append("")
-    return "\n".join(linhas)
+        lines.append("")
+    return "\n".join(lines)
 
-def escapar_texto_ics(texto: str) -> str:
+
+def _escape_ics(text: str) -> str:
     return (
-        str(texto or "")
+        str(text or "")
         .replace("\\", "\\\\")
         .replace(";", "\\;")
         .replace(",", "\\,")
@@ -106,15 +112,16 @@ def escapar_texto_ics(texto: str) -> str:
         .replace("\n", "\\n")
     )
 
-def gerar_arquivo_ics(usuario: str, semana: int, planilha: list) -> str:
-    agora = agora_br()
-    agora_utc = agora.astimezone(ZoneInfo("UTC"))
-    hoje = agora.date()
 
-    dias_ate_segunda = (7 - hoje.weekday()) % 7
-    base_segunda = hoje + timedelta(days=dias_ate_segunda)
+def build_ics_calendar(usuario: str, semana: int, planilha: list[dict]) -> str:
+    now = now_br()
+    now_utc = now.astimezone(ZoneInfo("UTC"))
+    today = now.date()
 
-    eventos = [
+    days_to_monday = (7 - today.weekday()) % 7
+    monday = today + timedelta(days=days_to_monday)
+
+    events = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
         "PRODID:-//Treinador Pessoal//PT-BR//EN",
@@ -126,31 +133,31 @@ def gerar_arquivo_ics(usuario: str, semana: int, planilha: list) -> str:
         if item.get("modalidade", "").lower() == "descanso":
             continue
 
-        dia_nome = item.get("dia", "")
+        day_name = item.get("dia", "")
         offset = idx
-        for i, d in enumerate(DIAS_SEMANA_ORDEM):
-            if d.lower() in dia_nome.lower():
+        for i, d in enumerate(DIAS_SEMANA):
+            if d.lower() in day_name.lower():
                 offset = i
                 break
 
-        data_treino = base_segunda + timedelta(days=offset)
-        dt_inicio = data_treino.strftime("%Y%m%dT070000")
-        dt_fim = data_treino.strftime("%Y%m%dT080000")
-        uid = f"treinador-{usuario}-s{semana}-{idx}-{int(agora.timestamp())}@treinador"
+        workout_date = monday + timedelta(days=offset)
+        dt_start = workout_date.strftime("%Y%m%dT070000")
+        dt_end = workout_date.strftime("%Y%m%dT080000")
+        uid = f"treinador-{usuario}-s{semana}-{idx}-{int(now.timestamp())}@treinador"
 
-        summary = escapar_texto_ics(f"[{item['modalidade']}] {item['titulo']} ({item['duracao_ou_dist']})")
-        desc = escapar_texto_ics(item["descricao"])
+        summary = _escape_ics(f"[{item['modalidade']}] {item['titulo']} ({item['duracao_ou_dist']})")
+        desc = _escape_ics(item["descricao"])
 
-        eventos.extend([
+        events.extend([
             "BEGIN:VEVENT",
             f"UID:{uid}",
-            f"DTSTAMP:{agora_utc.strftime('%Y%m%dT%H%M%SZ')}",
-            f"DTSTART;TZID=America/Sao_Paulo:{dt_inicio}",
-            f"DTEND;TZID=America/Sao_Paulo:{dt_fim}",
+            f"DTSTAMP:{now_utc.strftime('%Y%m%dT%H%M%SZ')}",
+            f"DTSTART;TZID=America/Sao_Paulo:{dt_start}",
+            f"DTEND;TZID=America/Sao_Paulo:{dt_end}",
             f"SUMMARY:{summary}",
             f"DESCRIPTION:{desc}",
             "END:VEVENT"
         ])
 
-    eventos.append("END:VCALENDAR")
-    return "\r\n".join(eventos)
+    events.append("END:VCALENDAR")
+    return "\r\n".join(events)
