@@ -40,7 +40,6 @@ def _hash_pin_legado(usuario: str, pin: str) -> str:
 
 
 def verificar_pin(usuario: str, pin_digitado: str, stored_hash: str) -> tuple[bool, bool]:
-    """Retorna (valido, precisa_migrar_hash)."""
     if not stored_hash:
         return True, False
 
@@ -57,7 +56,6 @@ def verificar_pin(usuario: str, pin_digitado: str, stored_hash: str) -> tuple[bo
 
 
 def checar_bloqueio_login(usuario: str) -> int:
-    """Retorna segundos restantes de bloqueio (0 se liberado)."""
     tentativas = st.session_state.setdefault("login_guard", {})
     info = tentativas.get(usuario)
     if not info:
@@ -90,6 +88,7 @@ def default_athlete_data(pin_hash: str = "") -> dict:
         "pin_hash": pin_hash,
         "perfil": {},
         "semana_atual": 1,
+        "feedback_semana": "",
         "planilha": [],
         "historico": [],
         "provas": []
@@ -127,6 +126,7 @@ def normalize_workout(item: dict) -> dict:
         "sensacao": sensacao if sensacao in SENSACOES else "Ainda não fiz",
         "feedback": str(item.get("feedback", ""))[:600],
         "dados_arquivo": str(item.get("dados_arquivo", ""))[:300],
+        "analise_arquivo": str(item.get("analise_arquivo", ""))[:600],
         "arquivo_hash": str(item.get("arquivo_hash", ""))[:32]
     }
 
