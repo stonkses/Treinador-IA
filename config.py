@@ -1,13 +1,17 @@
 from zoneinfo import ZoneInfo
 
-VERSAO_APP = "v2.2"
-FUSO_BR = ZoneInfo("America/Sao_Paulo")
+APP_VERSION = "v3.0"
+TZ_BR = ZoneInfo("America/Sao_Paulo")
 
-DIAS_SEMANA_ORDEM = [
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
+MAX_LOGIN_ATTEMPTS = 5
+LOCKOUT_SECONDS = 300
+
+DIAS_SEMANA = [
     "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"
 ]
 
-SENSACOES_OPCOES = [
+SENSACOES = [
     "Ainda não fiz",
     "Leve e tranquilo",
     "Na medida certa",
@@ -15,10 +19,19 @@ SENSACOES_OPCOES = [
     "Exausto / Muito difícil"
 ]
 
-CSS_CUSTOMIZADO = """
+MODALIDADES = [
+    "Corrida de Rua",
+    "Triathlon",
+    "Musculação / Hipertrofia",
+    "Ciclismo",
+    "Natação",
+    "CrossFit / Funcional",
+    "Híbrido (Corrida + Musculação)"
+]
+
+APP_CSS = """
 <style>
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
+    #MainMenu, footer {visibility: hidden;}
     header {background: transparent !important;}
 
     .stApp {
@@ -81,7 +94,7 @@ CSS_CUSTOMIZADO = """
         border: 1px solid #253046 !important;
         border-radius: 16px !important;
         margin-bottom: 12px !important;
-        transition: all 0.2s ease;
+        transition: border-color 0.2s ease;
     }
     div[data-testid="stExpander"]:hover {
         border-color: #475569 !important;
