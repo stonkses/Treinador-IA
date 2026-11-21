@@ -23,7 +23,9 @@ from database import (
 from ai_coach import (
     sanitize_prompt_input,
     request_plan_json,
-    parse_and_validate_week
+    evaluate_uploaded_activity,
+    parse_and_validate_week,
+    parse_next_week_with_feedback
 )
 from parsers import parse_activity_file
 from utils import (
@@ -32,8 +34,10 @@ from utils import (
     greeting_br,
     get_next_race,
     get_periodization_phase,
+    compute_pace_zones,
     build_races_context,
     format_whatsapp_plan,
+    build_plan_pdf,
     build_ics_calendar
 )
 
@@ -193,6 +197,21 @@ with st.sidebar:
         dados_atleta["perfil"]["dias_disponiveis"] = dias_selecionados
         save_athlete(usuario_input, dados_atleta)
 
+    with st.expander("⏱️ Tempo base 5 km (Zonas de Ritmo)"):
+        st.caption("Se ainda não tem prova passada cadastrada, informe seu tempo nos 5 km para calcular seus ritmos.")
+        tempo_5k_in = st.text_input(
+            "Tempo nos 5 km",
+            value=perfil.get("tempo_5k", ""),
+            max_chars=20,
+            placeholder="Ex: 25:30",
+            key="base_5k_input"
+        )
+        if st.button("Salvar tempo base", use_container_width=True):
+            dados_atleta.setdefault("perfil", {})["tempo_5k"] = tempo_5k_in.strip()[:20]
+            save_athlete(usuario_input, dados_atleta)
+            st.success("Zonas atualizadas!")
+            st.rerun()
+
     st.divider()
     with st.expander("Alterar meu PIN"):
         pin_atual_in = st.text_input("PIN atual", type="password", max_chars=8, key="pin_old")
@@ -220,12 +239,13 @@ with st.sidebar:
     st.caption(f"Versão {APP_VERSION}")
 
 # ==========================================
-# CABEÇALHO DO ATLETA
+# CABEÇALHO DO ATLETA + ZONAS
 # ==========================================
 semana_num = dados_atleta.get("semana_atual", 1)
 esporte_atual = perfil.get("esporte", "Treino Personalizado")
 objetivo_atual = perfil.get("objetivo", "Evoluir com consistência")
 proxima_prova = get_next_race(provas_salvas)
+zonas_ritmo = compute_pace_zones(perfil, provas_salvas)
 
 nome_seguro = esc(usuario_input.capitalize())
 esporte_seguro = esc(esporte_atual)
@@ -253,6 +273,27 @@ st.markdown(f"""
     {pill_html}
 </div>
 """, unsafe_allow_html=True)
+
+feedback_semana_atual = dados_atleta.get("feedback_semana", "")
+if feedback_semana_atual:
+    st.markdown(f"""
+    <div class="coach-note">
+        <div class="coach-note-title">💬 Avaliação do Treinador sobre a semana anterior</div>
+        {esc(feedback_semana_atual)}
+    </div>
+    """, unsafe_allow_html=True)
+
+if zonas_ritmo:
+    st.markdown(f"""
+    <div class="zones-bar">
+        <strong>🎯 Suas Zonas de Ritmo</strong> <em>({esc(zonas_ritmo['fonte'])})</em>:<br>
+        <strong>Z1:</strong> {esc(zonas_ritmo['Z1 (Regenerativo)'])} &nbsp;|&nbsp;
+        <strong>Z2:</strong> {esc(zonas_ritmo['Z2 (Base Aeróbica)'])} &nbsp;|&nbsp;
+        <strong>Z3:</strong> {esc(zonas_ritmo['Z3 (Ritmo / Tempo)'])} &nbsp;|&nbsp;
+        <strong>Z4:</strong> {esc(zonas_ritmo['Z4 (Limiar)'])} &nbsp;|&nbsp;
+        <strong>Z5:</strong> {esc(zonas_ritmo['Z5 (Tiros / VO2)'])}
+    </div>
+    """, unsafe_allow_html=True)
 
 planilha_atual = dados_atleta.get("planilha", [])
 
@@ -306,7 +347,7 @@ if not planilha_atual:
                             })
 
                         dias_descanso = [d for d in DIAS_SEMANA if d not in dias_selecionados]
-                        info_provas = build_races_context(provas_iniciais)
+                        info_provas = build_races_context(provas_iniciais, zonas_ritmo)
                         obj_clean = sanitize_prompt_input(objetivo or "Evoluir com saúde e consistência", 140)
                         obs_clean = sanitize_prompt_input(observacoes or "Nenhuma", 400)
 
@@ -321,14 +362,14 @@ Monte os treinos da Semana 1 para este aluno:
 - Observações pessoais: {obs_clean}
 </dados_aluno>
 
-<calendario_provas>
+<calendario_provas_e_zonas>
 {info_provas}
-</calendario_provas>
+</calendario_provas_e_zonas>
 
 REGRAS:
 1. Retorne os 7 dias da semana na ordem exata: Segunda, Terça, Quarta, Quinta, Sexta, Sábado, Domingo.
 2. Coloque treino APENAS nos dias disponíveis ({', '.join(dias_selecionados)}). Nos outros dias, use "modalidade": "Descanso" e "titulo": "Dia de descanso".
-3. Escreva descrições claras e práticas (aquecimento, parte principal e volta à calma).
+3. Se houver zonas de ritmo calculadas acima, inclua os ritmos alvo nas sessões de corrida.
 4. Retorne um array JSON com 7 objetos contendo as chaves: "dia", "modalidade", "titulo", "descricao", "duracao_ou_dist".
 """
                         resposta = request_plan_json(prompt)
@@ -338,10 +379,12 @@ REGRAS:
                             "nivel": nivel,
                             "objetivo": obj_clean,
                             "dias_disponiveis": dias_selecionados,
-                            "observacoes": obs_clean
+                            "observacoes": obs_clean,
+                            "tempo_5k": perfil.get("tempo_5k", "")
                         }
                         dados_atleta["provas"] = provas_iniciais
                         dados_atleta["semana_atual"] = 1
+                        dados_atleta["feedback_semana"] = ""
                         dados_atleta["planilha"] = nova_planilha
                         save_athlete(usuario_input, dados_atleta)
                         st.rerun()
@@ -380,9 +423,11 @@ Retorne um array JSON com 7 objetos (Segunda a Domingo) e as chaves:
                             "esporte": sanitize_prompt_input(esporte_imp, 50) or "Corrida",
                             "nivel": "Intermediário",
                             "objetivo": "Evolução contínua",
-                            "dias_disponiveis": dias_selecionados
+                            "dias_disponiveis": dias_selecionados,
+                            "tempo_5k": perfil.get("tempo_5k", "")
                         }
                         dados_atleta["semana_atual"] = 1
+                        dados_atleta["feedback_semana"] = ""
                         dados_atleta["planilha"] = nova_planilha
                         save_athlete(usuario_input, dados_atleta)
                         st.rerun()
@@ -434,6 +479,8 @@ else:
 
                 if item.get("dados_arquivo"):
                     st.success(f"⌚ Atividade importada: **{item['dados_arquivo']}**")
+                    if item.get("analise_arquivo"):
+                        st.info(f"💬 **Análise do Treinador:** {item['analise_arquivo']}")
 
                 if not eh_descanso:
                     st.divider()
@@ -483,14 +530,17 @@ else:
                         try:
                             resumo_arq, arq_hash = parse_activity_file(arquivo_up)
                             if planilha_atual[i].get("arquivo_hash") != arq_hash:
-                                planilha_atual[i]["dados_arquivo"] = resumo_arq
-                                planilha_atual[i]["arquivo_hash"] = arq_hash
-                                planilha_atual[i]["concluido"] = True
-                                if planilha_atual[i]["sensacao"] == "Ainda não fiz":
-                                    planilha_atual[i]["sensacao"] = "Na medida certa"
-                                dados_atleta["planilha"] = planilha_atual
-                                save_athlete(usuario_input, dados_atleta)
-                                st.rerun()
+                                with st.spinner("Lendo atividade e avaliando desempenho..."):
+                                    analise_arq = evaluate_uploaded_activity(planilha_atual[i], resumo_arq)
+                                    planilha_atual[i]["dados_arquivo"] = resumo_arq
+                                    planilha_atual[i]["analise_arquivo"] = analise_arq[:600]
+                                    planilha_atual[i]["arquivo_hash"] = arq_hash
+                                    planilha_atual[i]["concluido"] = True
+                                    if planilha_atual[i]["sensacao"] == "Ainda não fiz":
+                                        planilha_atual[i]["sensacao"] = "Na medida certa"
+                                    dados_atleta["planilha"] = planilha_atual
+                                    save_athlete(usuario_input, dados_atleta)
+                                    st.rerun()
                         except Exception as exc:
                             st.error(f"Não foi possível ler esse arquivo: {exc}")
 
@@ -507,20 +557,10 @@ else:
                 if not dias_selecionados:
                     st.error("Escolha pelo menos 1 dia de treino na barra lateral.")
                 else:
-                    with st.spinner("Analisando sua semana e preparando a próxima..."):
+                    with st.spinner("Avaliando sua semana e preparando a próxima..."):
                         try:
-                            historico = dados_atleta.get("historico", [])
-                            historico.append({
-                                "semana": semana_num,
-                                "data_fechamento": today_br().strftime("%d/%m/%Y"),
-                                "adesao": taxa_adesao,
-                                "treinos_concluidos": len(concluidos),
-                                "treinos_totais": len(treinos_ativos),
-                                "planilha": json.loads(json.dumps(planilha_atual))
-                            })
-
                             dias_descanso = [d for d in DIAS_SEMANA if d not in dias_selecionados]
-                            info_provas = build_races_context(provas_salvas)
+                            info_provas = build_races_context(provas_salvas, zonas_ritmo)
                             resumo_semana = json.dumps(planilha_atual, ensure_ascii=False)
 
                             prompt = f"""
@@ -530,9 +570,9 @@ Analise como foi a Semana {semana_num} deste aluno e monte os treinos da Semana 
 {json.dumps(dados_atleta.get('perfil', {}), ensure_ascii=False)}
 </perfil_aluno>
 
-<calendario_e_historico_provas>
+<calendario_provas_e_zonas>
 {info_provas}
-</calendario_e_historico_provas>
+</calendario_provas_e_zonas>
 
 Dias disponíveis para treinar na Semana {semana_num + 1}: {', '.join(dias_selecionados)}
 Dias de descanso: {', '.join(dias_descanso) if dias_descanso else 'Nenhum'}
@@ -543,17 +583,33 @@ Dias de descanso: {', '.join(dias_descanso) if dias_descanso else 'Nenhum'}
 
 REGRAS DE PERIODIZAÇÃO:
 - Respeite a fase da prova (Base, Construção, Pico ou Polimento na semana da prova).
-- Use os tempos e PRs registrados em provas anteriores como referência de ritmo.
+- Use os tempos, PRs e zonas de ritmo calculadas como referência de pace.
 - Se o aluno completou bem e se sentiu leve/na medida, evolua gradualmente.
 - Se relatou cansaço, treino pesado/exausto ou faltou a treinos, reduza a carga para recuperação.
 - Coloque treinos APENAS nos dias selecionados ({', '.join(dias_selecionados)}). Nos outros dias, coloque "modalidade": "Descanso".
-- Retorne um array JSON com 7 objetos (Segunda a Domingo) e as chaves: "dia", "modalidade", "titulo", "descricao", "duracao_ou_dist".
+
+FORMATO DE RESPOSTA:
+Retorne EXCLUSIVAMENTE um objeto JSON com duas chaves:
+1. "feedback_semana": Um comentário curto, humano e direto (2 a 3 frases) avaliando como o aluno foi na Semana {semana_num} e o foco da Semana {semana_num + 1}.
+2. "planilha": Um array com os 7 objetos da semana (Segunda a Domingo) e as chaves: "dia", "modalidade", "titulo", "descricao", "duracao_ou_dist".
 """
                             resposta = request_plan_json(prompt)
-                            proxima_planilha = parse_and_validate_week(resposta)
+                            feedback_gerado, proxima_planilha = parse_next_week_with_feedback(resposta)
+
+                            historico = dados_atleta.get("historico", [])
+                            historico.append({
+                                "semana": semana_num,
+                                "data_fechamento": today_br().strftime("%d/%m/%Y"),
+                                "adesao": taxa_adesao,
+                                "treinos_concluidos": len(concluidos),
+                                "treinos_totais": len(treinos_ativos),
+                                "feedback_treinador": feedback_gerado,
+                                "planilha": json.loads(json.dumps(planilha_atual))
+                            })
 
                             dados_atleta["historico"] = historico
                             dados_atleta["semana_atual"] = semana_num + 1
+                            dados_atleta["feedback_semana"] = feedback_gerado
                             dados_atleta["planilha"] = proxima_planilha
                             save_athlete(usuario_input, dados_atleta)
                             st.rerun()
@@ -561,7 +617,7 @@ REGRAS DE PERIODIZAÇÃO:
                             st.error(f"Não foi possível gerar a próxima semana: {exc}")
 
     # ------------------------------------------
-    # ABA 2: MINHAS PROVAS (FUTURAS + PASSADAS COM TEMPO/PR)
+    # ABA 2: MINHAS PROVAS
     # ------------------------------------------
     with tab_provas:
         st.subheader("🏆 Suas Provas Alvo")
@@ -699,18 +755,18 @@ O aluno pediu uma adaptação na Semana {semana_num}.
 {json.dumps(planilha_atual, ensure_ascii=False)}
 </treinos_atuais>
 
-<calendario_provas>
-{build_races_context(provas_salvas)}
-</calendario_provas>
+<calendario_provas_e_zonas>
+{build_races_context(provas_salvas, zonas_ritmo)}
+</calendario_provas_e_zonas>
 
 <pedido_aluno>
 {pedido_clean}
 </pedido_aluno>
 
 REGRAS:
-1. Ajuste APENAS os dias necessários para atender o pedido dentro de <pedido_aluno>, mantendo intactos os treinos já concluídos ("concluido", "sensacao", "feedback", "dados_arquivo", "arquivo_hash").
+1. Ajuste APENAS os dias necessários para atender o pedido dentro de <pedido_aluno>, mantendo intactos os treinos já concluídos ("concluido", "sensacao", "feedback", "dados_arquivo", "analise_arquivo", "arquivo_hash").
 2. Mantenha os 7 dias da semana (Segunda a Domingo).
-3. Retorne um array JSON atualizado com 7 objetos e as chaves: "dia", "modalidade", "titulo", "descricao", "duracao_ou_dist", "concluido", "sensacao", "feedback", "dados_arquivo", "arquivo_hash".
+3. Retorne um array JSON atualizado com 7 objetos e as chaves: "dia", "modalidade", "titulo", "descricao", "duracao_ou_dist", "concluido", "sensacao", "feedback", "dados_arquivo", "analise_arquivo", "arquivo_hash".
 """
                         resposta = request_plan_json(prompt_ajuste)
                         planilha_ajustada = parse_and_validate_week(resposta)
@@ -737,6 +793,9 @@ REGRAS:
             idx_escolhido = len(historico) - 1 - opcoes_semanas.index(escolha)
             registro_semana = historico[idx_escolhido]
 
+            if registro_semana.get("feedback_treinador"):
+                st.info(f"💬 **Avaliação do Treinador:** {registro_semana['feedback_treinador']}")
+
             planilha_arquivada = registro_semana.get("planilha", [])
             if planilha_arquivada:
                 for t_ant in planilha_arquivada:
@@ -759,7 +818,7 @@ REGRAS:
             st.info("Quando você concluir esta semana e gerar a próxima, o resumo dela vai aparecer aqui.")
 
     # ------------------------------------------
-    # ABA 5: EXPORTAR (WHATSAPP & AGENDA)
+    # ABA 5: EXPORTAR (WHATSAPP, PDF & AGENDA)
     # ------------------------------------------
     with tab_exportar:
         st.subheader("📤 Levar treinos para o celular")
@@ -771,14 +830,25 @@ REGRAS:
             st.text_area("Texto formatado:", value=texto_wpp, height=240)
 
         with col_ex2:
-            st.markdown("**Adicionar ao Calendário (Google / Apple)**")
-            st.write("Baixe o arquivo abaixo para colocar os treinos da semana na sua agenda.")
+            st.markdown("**Baixar em PDF ou Adicionar ao Calendário**")
+            st.write("Exporte sua planilha da semana em PDF ou importe direto na sua agenda.")
+
+            pdf_bytes = build_plan_pdf(usuario_input, semana_num, perfil, planilha_atual, feedback_semana_atual)
+            st.download_button(
+                label="📄 Baixar Planilha em PDF",
+                data=pdf_bytes,
+                file_name=f"treinos_semana_{semana_num}_{usuario_input}.pdf",
+                mime="application/pdf",
+                type="primary",
+                use_container_width=True
+            )
+
+            st.write("")
             ics_conteudo = build_ics_calendar(usuario_input, semana_num, planilha_atual)
             st.download_button(
                 label="📅 Baixar para minha Agenda (.ics)",
                 data=ics_conteudo,
                 file_name=f"treinos_semana_{semana_num}_{usuario_input}.ics",
                 mime="text/calendar",
-                type="primary",
                 use_container_width=True
             )
