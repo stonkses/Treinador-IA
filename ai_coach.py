@@ -17,10 +17,10 @@ SYSTEM_COACH_TEXT = (
     "Responda em português do Brasil em no máximo 2 frases curtas."
 )
 
-FAST_MODELS = [
-    "gemini-3.8-flash",
+PREFERRED_MODELS = [
     "gemini-3-flash-preview",
     "gemini-3.1-flash-lite-preview",
+    "gemini-flash-latest",
 ]
 
 
@@ -29,10 +29,34 @@ def _get_genai_client() -> genai.Client:
     api_key = st.secrets.get("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("Chave GEMINI_API_KEY ausente nos secrets.")
-    return genai.Client(
-        api_key=api_key,
-        http_options={"api_version": "v1beta", "timeout": 12.0}
-    )
+    return genai.Client(api_key=api_key, http_options={"api_version": "v1beta"})
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _get_valid_models() -> list[str]:
+    try:
+        client = _get_genai_client()
+        found = []
+        for m in client.models.list():
+            name = m.name.replace("models/", "")
+            if (
+                "gemini" in name
+                and "flash" in name
+                and "2.5" not in name
+                and "2.0" not in name
+                and "1.5" not in name
+                and "embedding" not in name
+                and "imagen" not in name
+                and "audio" not in name
+                and "tts" not in name
+            ):
+                found.append(name)
+        ordered = [m for m in PREFERRED_MODELS if m in found] + [
+            m for m in found if m not in PREFERRED_MODELS
+        ]
+        return ordered or PREFERRED_MODELS
+    except Exception:
+        return PREFERRED_MODELS
 
 
 def sanitize_prompt_input(text: str, max_len: int = 500) -> str:
@@ -46,7 +70,6 @@ def _generate_fast(model_name: str, prompt: str, system_instruction: str, json_m
     base_kwargs = {
         "system_instruction": system_instruction,
         "temperature": 0.3,
-        "max_output_tokens": 1800 if json_mode else 250,
     }
     if json_mode:
         base_kwargs["response_mime_type"] = "application/json"
@@ -67,8 +90,9 @@ def _generate_fast(model_name: str, prompt: str, system_instruction: str, json_m
 
 
 def request_plan_json(prompt: str) -> str:
+    models = _get_valid_models()
     last_err = ""
-    for model_name in FAST_MODELS:
+    for model_name in models[:3]:
         try:
             text = _generate_fast(model_name, prompt, SYSTEM_COACH_JSON, json_mode=True)
             if text:
@@ -77,14 +101,15 @@ def request_plan_json(prompt: str) -> str:
             last_err = str(exc)
 
     if "503" in last_err or "UNAVAILABLE" in last_err:
-        raise RuntimeError("Servidores ocupados no momento. Tente novamente em alguns segundos.")
+        raise RuntimeError("Servidores ocupados no momento (503). Aguarde 10 segundos e tente novamente.")
     if "429" in last_err or "RESOURCE_EXHAUSTED" in last_err:
-        raise RuntimeError("Limite de requisições atingido. Aguarde 1 minuto.")
-    raise RuntimeError("Não foi possível conectar ao treinador agora. Tente novamente.")
+        raise RuntimeError("Limite de requisições atingido (429). Aguarde 1 minuto.")
+    raise RuntimeError(f"Falha na conexão com a IA ({last_err[:120]}).")
 
 
 def request_coach_comment(prompt: str) -> str:
-    for model_name in FAST_MODELS[:2]:
+    models = _get_valid_models()
+    for model_name in models[:2]:
         try:
             text = _generate_fast(model_name, prompt, SYSTEM_COACH_TEXT, json_mode=False)
             if text:
